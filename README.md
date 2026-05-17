@@ -1,5 +1,11 @@
 # Amulet-Plugins
 
+Community-maintained fork of PREMIEREHELL/Amulet-Plugins.
+
+This fork currently focuses on stability and UI fixes for the inventory editor and related tools.
+
+Original project credit and documentation are preserved below.
+
 Welcome to **Amulet-Plugins**, where I share tools and plugins for **Minecraft editing**.  
 
 Currently available:
