@@ -1,4 +1,3 @@
-```yml
 name: Feature Request
 description: Suggest an improvement or new feature.
 title: "[Feature]: "
@@ -35,4 +34,3 @@ body:
       label: Additional Notes
       description: |
         Optional screenshots, mockups, references, or extra details.
-```
