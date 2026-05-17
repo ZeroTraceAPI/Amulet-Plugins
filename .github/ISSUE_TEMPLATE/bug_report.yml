@@ -1,0 +1,91 @@
+name: Bug Report
+description: Create a report to help us improve
+title: "[Bug]: "
+labels: ["bug"]
+
+body:
+  - type: checkboxes
+    attributes:
+      label: Before reporting
+      options:
+        - label: I searched existing issues to make sure this was not already reported.
+          required: true
+
+        - label: I tested this on the latest community-maintained branch if available.
+          required: false
+
+  - type: textarea
+    attributes:
+      label: Describe the issue
+      description: Clearly explain what happened.
+      placeholder: The inventory editor crashes when...
+    validations:
+      required: true
+
+  - type: textarea
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open Amulet
+        2. Open Inventory Editor
+        3. Click...
+        4. Crash occurs
+    validations:
+      required: true
+
+  - type: textarea
+    attributes:
+      label: Expected behavior
+      description: What should happen instead?
+    validations:
+      required: true
+
+  - type: dropdown
+    attributes:
+      label: Minecraft edition
+      options:
+        - Bedrock Edition
+        - Java Edition
+        - Both
+        - Unknown
+    validations:
+      required: true
+
+  - type: input
+    attributes:
+      label: Minecraft version
+      placeholder: "1.21.82"
+    validations:
+      required: false
+
+  - type: input
+    attributes:
+      label: Amulet version
+      placeholder: "0.10.x"
+    validations:
+      required: false
+
+  - type: input
+    attributes:
+      label: Operating system
+      placeholder: "Windows 11"
+    validations:
+      required: true
+
+  - type: input
+    attributes:
+      label: Plugin branch / version
+      placeholder: "community-maintained-v1"
+    validations:
+      required: false
+
+  - type: textarea
+    attributes:
+      label: Console errors or logs
+      description: Paste any relevant errors here.
+      render: shell
+
+  - type: textarea
+    attributes:
+      label: Screenshots or videos
+      description: Optional

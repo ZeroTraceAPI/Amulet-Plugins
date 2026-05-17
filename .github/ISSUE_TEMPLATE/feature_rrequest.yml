@@ -1,0 +1,38 @@
+```yml
+name: Feature Request
+description: Suggest an improvement or new feature.
+title: "[Feature]: "
+labels: ["enhancement"]
+
+body:
+  - type: textarea
+    attributes:
+      label: Feature Description
+      description: |
+        Clearly describe the feature, improvement, or idea.
+    validations:
+      required: true
+
+  - type: textarea
+    attributes:
+      label: Problem or Limitation
+      description: |
+        What problem would this solve?
+        What limitation currently exists?
+      placeholder: |
+        The current inventory editor cannot...
+
+  - type: textarea
+    attributes:
+      label: Proposed Solution
+      description: |
+        Describe how you think this could work.
+      placeholder: |
+        Add a button that...
+
+  - type: textarea
+    attributes:
+      label: Additional Notes
+      description: |
+        Optional screenshots, mockups, references, or extra details.
+```
