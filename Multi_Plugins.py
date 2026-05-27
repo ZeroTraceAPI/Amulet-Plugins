@@ -11,6 +11,7 @@ import pickle
 import uuid
 import re
 import wx
+import wx.grid
 import wx.richtext as rt
 import math
 from math import ceil
@@ -18571,4 +18572,4 @@ class MultiTools(wx.Panel, DefaultOperationUI):
                               "The Plugin has Been Updated", wx.OK | wx.ICON_INFORMATION)
 
 
-export = dict(name="# Multi TOOLS", operation=MultiTools)  # By PremiereHell
+export = dict(name="Multi TOOLS", operation=MultiTools)  # By PremiereHell
