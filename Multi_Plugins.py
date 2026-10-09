@@ -1,7 +1,4 @@
-# 9 v
-import urllib.request
-import collections
-import time
+﻿import collections
 import sys
 import ctypes
 import copy
@@ -24,7 +21,7 @@ from amulet_map_editor.programs.edit.api.key_config import ACT_BOX_CLICK
 from amulet_map_editor.programs.edit.api.events import (
     EVT_SELECTION_CHANGE,
 )
-from typing import TYPE_CHECKING, Type, Any, Callable, Tuple, BinaryIO, Optional, Union, List
+from typing import TYPE_CHECKING, Tuple, Union
 from amulet.utils import chunk_coords_to_region_coords
 from amulet.utils import block_coords_to_chunk_coords
 from amulet.level.formats.anvil_world.region import AnvilRegion
@@ -40,15 +37,13 @@ from amulet_map_editor.programs.edit.api.events import (
     EVT_INPUT_PRESS,
 )
 from amulet_map_editor.programs.edit.api.operations import DefaultOperationUI
-from amulet_map_editor.api.wx.ui.base_select import BaseSelect
 from amulet_map_editor.api.wx.ui.block_select import BlockDefine
-from amulet_map_editor.api.wx.ui.block_select import BlockSelect
 from amulet.api.block import Block
 from amulet.api.block_entity import BlockEntity
 from amulet.api.errors import ChunkDoesNotExist
 from amulet_map_editor.api.wx.ui import simple
 from amulet_map_editor.api import image
-from functools import partial, reduce
+from functools import reduce
 import operator
 from PIL import Image
 from amulet_map_editor.api.wx.ui.version_select import VersionSelect
@@ -60,17 +55,94 @@ from amulet_nbt import *
 import os
 from os.path import exists
 from pathlib import Path
-from amulet_map_editor.api.wx.ui.block_select.properties import (
-    PropertySelect,
-    WildcardSNBTType,
-    EVT_PROPERTIES_CHANGE,
-)
-from amulet_map_editor.programs.edit.api.events import (
-    EVT_SELECTION_CHANGE,
-)
+from amulet_map_editor.api.wx.ui.block_select.properties import EVT_PROPERTIES_CHANGE
 import base64
 import io
 import wx.lib.scrolledpanel as scrolled
+ORIGINAL_REPOSITORY_URL = "https://github.com/PREMIEREHELL/Amulet-Plugins"
+COMMUNITY_REPOSITORY_URL = "https://github.com/ZeroTraceAPI/Amulet-Plugins"
+
+def _ui_dpi_scale(window):
+    """Return a stable DPI scale ratio for explicit pixel-like UI metrics."""
+    scale = 1.0
+    try:
+        getter = getattr(window, "GetDPIScaleFactor", None)
+        if callable(getter):
+            scale = float(getter())
+        else:
+            getter = getattr(window, "GetContentScaleFactor", None)
+            if callable(getter):
+                scale = float(getter())
+    except Exception:
+        scale = 1.0
+    if not math.isfinite(scale) or scale <= 0:
+        try:
+            dpi = window.GetDPI()
+            scale = float(dpi.width) / 96.0 if dpi.width else 1.0
+        except Exception:
+            scale = 1.0
+    return max(1.0, min(2.25, scale))
+
+def _ui_metric(window, at_100, at_225):
+    """Continuously interpolate a tuned UI metric from 100% to 225% scaling."""
+    scale = _ui_dpi_scale(window)
+    t = (scale - 1.0) / 1.25
+    return int(round(float(at_100) + (float(at_225) - float(at_100)) * t))
+
+def _ui_metric_three(window, at_100, at_150, at_225):
+    """Piecewise-linear interpolation through calibrated 100%, 150%, and 225% points.
+
+    Use this only for controls whose native rendering is visibly non-linear across
+    DPI, such as stock platform artwork. Layout geometry continues to use
+    _ui_metric so intermediate scales remain continuous.
+    """
+    scale = _ui_dpi_scale(window)
+    if scale <= 1.5:
+        t = (scale - 1.0) / 0.5
+        return int(round(float(at_100) + (float(at_150) - float(at_100)) * t))
+    t = (scale - 1.5) / 0.75
+    return int(round(float(at_150) + (float(at_225) - float(at_150)) * t))
+
+def _ui_is_1440p_150(window):
+    """Identify the specifically tuned 2560 x 1440, 150% window layout.
+
+    A failed display query falls back to the existing universal geometry.
+    """
+    try:
+        scale = _ui_dpi_scale(window)
+        if not 1.45 <= scale <= 1.55:
+            return False
+        index = wx.Display.GetFromWindow(window)
+        if index == wx.NOT_FOUND and window.GetParent() is not None:
+            index = wx.Display.GetFromWindow(window.GetParent())
+        display = wx.Display(index) if index != wx.NOT_FOUND else wx.Display()
+        mode = display.GetCurrentMode()
+        return mode.GetWidth() == 2560 and mode.GetHeight() == 1440
+    except Exception:
+        return False
+
+
+def _float_on_parent_style(base=wx.DEFAULT_FRAME_STYLE):
+    return base | wx.FRAME_FLOAT_ON_PARENT
+
+def _clamp_window_to_display(window, width_fraction=0.96, height_fraction=0.92):
+    """Keep a top-level window fully inside the current usable display rectangle."""
+    try:
+        rect = wx.GetClientDisplayRect()
+        size = window.GetSize()
+        max_w = max(1, int(rect.width * width_fraction))
+        max_h = max(1, int(rect.height * height_fraction))
+        new_w = min(size.width, max_w)
+        new_h = min(size.height, max_h)
+        if (new_w, new_h) != (size.width, size.height):
+            window.SetSize(wx.Size(new_w, new_h))
+        x, y = window.GetPosition()
+        max_x = rect.x + max(0, rect.width - new_w)
+        max_y = rect.y + max(0, rect.height - new_h)
+        window.SetPosition((min(max(x, rect.x), max_x), min(max(y, rect.y), max_y)))
+    except Exception:
+        pass
+
 if TYPE_CHECKING:
     from amulet.api.level import BaseLevel
     from amulet_map_editor.programs.edit.api.canvas import EditCanvas
@@ -172,32 +244,9 @@ def create_new_actor_prefix(start, cnt):
     db_key = b''.join([b'actorprefix', actorKey])
     return db_key, actorKey
 
-def uniqueid_to_actorprefix_key(UniqueID: LongTag):
-    packed_data = struct.pack('<q', UniqueID.py_data)
-    cnt, worldstartcnt = struct.unpack('<LL', packed_data)
-    start_cnt = 4294967296 - worldstartcnt
-    actorKey = struct.pack('>LL', start_cnt, cnt)
-    db_key = b''.join([b'actorprefix', actorKey])
-    return db_key
 
-def _genorate_uid(cnt, worldstartcount):
-    start_c = worldstartcount
-    new_gen = struct.pack('<LL', int(cnt), int(start_c))
-    new_tag = LongTag(struct.unpack('<q', new_gen)[0])
-    return new_tag
 
-def _storage_key_(val):
-    if isinstance(val, bytes):
-        return struct.unpack('>II', val)
-    if isinstance(val, StringTag):
-        return ByteArrayTag([x for x in val.py_data])
-    if isinstance(val, ByteArrayTag):
-        data = b''
-        for b in val: data += b
-        return data
 
-def split_bytes(data):
-    return [data[i:i + 8] for i in range(0, len(data), 8)]
 
 def get_y_range(test_val):
     if test_val == struct.pack('<i', 1) or 'minecraft:the_nether' == test_val:
@@ -310,6 +359,2020 @@ categories = {
         "Enchanted_Books": [1497, 1498, 1499, 1500, 1501, 1502, 1503, 1504, 1505, 1506, 1507, 1508, 1509, 1510, 1511, 1512, 1513, 1514, 1515, 1516, 1517, 1518, 1519, 1520, 1521, 1522, 1523, 1524, 1525, 1526, 1527, 1528, 1529, 1530, 1531, 1532, 1533, 1534, 1535, 1536, 1537, 1538, 1539, 1540, 1541, 1542, 1543, 1544, 1545, 1546, 1547, 1548, 1549, 1550, 1551, 1552, 1553, 1554, 1555, 1556, 1557, 1558, 1559, 1560, 1561, 1562, 1563, 1564, 1565, 1566, 1567, 1568, 1569, 1570, 1571, 1572, 1573, 1574, 1575, 1576, 1577, 1578, 1579, 1580, 1581, 1582, 1583, 1584, 1585, 1586, 1587, 1588, 1589, 1590, 1591, 1592, 1593, 1594, 1595, 1596, 1597, 1598, 1599, 1600, 1601, 1602, 1603, 1604, 1605, 1606, 1607, 1608, 1609, 1610, 1611, 1612, 1613, 1614, 1615, 1616, 1617, 1618],
     },
 }
+# Inventory slot-menu categories use stable item IDs rather than atlas positions.
+# This prevents new atlas entries from shifting existing menu classifications.
+SLOT_MENU_CATEGORIES = {'Building Blocks': {'Planks': ['oak_planks',
+                                'spruce_planks',
+                                'birch_planks',
+                                'jungle_planks',
+                                'acacia_planks',
+                                'dark_oak_planks',
+                                'mangrove_planks',
+                                'cherry_planks',
+                                'pale_oak_planks',
+                                'bamboo_planks',
+                                'crimson_planks',
+                                'warped_planks',
+                                'poplar_planks'],
+                     'Stairs': ['normal_stone_stairs',
+                                'stone_stairs',
+                                'mossy_cobblestone_stairs',
+                                'oak_stairs',
+                                'spruce_stairs',
+                                'birch_stairs',
+                                'jungle_stairs',
+                                'acacia_stairs',
+                                'dark_oak_stairs',
+                                'mangrove_stairs',
+                                'cherry_stairs',
+                                'pale_oak_stairs',
+                                'bamboo_stairs',
+                                'bamboo_mosaic_stairs',
+                                'stone_brick_stairs',
+                                'mossy_stone_brick_stairs',
+                                'sandstone_stairs',
+                                'smooth_sandstone_stairs',
+                                'red_sandstone_stairs',
+                                'smooth_red_sandstone_stairs',
+                                'granite_stairs',
+                                'polished_granite_stairs',
+                                'diorite_stairs',
+                                'polished_diorite_stairs',
+                                'andesite_stairs',
+                                'polished_andesite_stairs',
+                                'brick_stairs',
+                                'nether_brick_stairs',
+                                'red_nether_brick_stairs',
+                                'end_brick_stairs',
+                                'quartz_stairs',
+                                'smooth_quartz_stairs',
+                                'purpur_stairs',
+                                'prismarine_stairs',
+                                'dark_prismarine_stairs',
+                                'prismarine_bricks_stairs',
+                                'crimson_stairs',
+                                'warped_stairs',
+                                'blackstone_stairs',
+                                'polished_blackstone_stairs',
+                                'polished_blackstone_brick_stairs',
+                                'cobbled_deepslate_stairs',
+                                'deepslate_tile_stairs',
+                                'polished_deepslate_stairs',
+                                'deepslate_brick_stairs',
+                                'tuff_stairs',
+                                'polished_tuff_stairs',
+                                'tuff_brick_stairs',
+                                'mud_brick_stairs',
+                                'cut_copper_stairs',
+                                'exposed_cut_copper_stairs',
+                                'weathered_cut_copper_stairs',
+                                'oxidized_cut_copper_stairs',
+                                'waxed_cut_copper_stairs',
+                                'waxed_exposed_cut_copper_stairs',
+                                'waxed_weathered_cut_copper_stairs',
+                                'waxed_oxidized_cut_copper_stairs',
+                                'resin_brick_stairs',
+                                'black_concrete_stairs',
+                                'black_wool_stairs',
+                                'blue_concrete_stairs',
+                                'blue_wool_stairs',
+                                'brown_concrete_stairs',
+                                'brown_wool_stairs',
+                                'cinnabar_brick_stairs',
+                                'cinnabar_stairs',
+                                'cyan_concrete_stairs',
+                                'cyan_wool_stairs',
+                                'gray_concrete_stairs',
+                                'gray_wool_stairs',
+                                'green_concrete_stairs',
+                                'green_wool_stairs',
+                                'light_blue_concrete_stairs',
+                                'light_blue_wool_stairs',
+                                'light_gray_concrete_stairs',
+                                'light_gray_wool_stairs',
+                                'lime_concrete_stairs',
+                                'lime_wool_stairs',
+                                'magenta_concrete_stairs',
+                                'magenta_wool_stairs',
+                                'orange_concrete_stairs',
+                                'orange_wool_stairs',
+                                'pink_concrete_stairs',
+                                'pink_wool_stairs',
+                                'polished_cinnabar_stairs',
+                                'polished_sulfur_stairs',
+                                'poplar_stairs',
+                                'purple_concrete_stairs',
+                                'purple_wool_stairs',
+                                'red_concrete_stairs',
+                                'red_wool_stairs',
+                                'sulfur_brick_stairs',
+                                'sulfur_stairs',
+                                'white_concrete_stairs',
+                                'white_wool_stairs',
+                                'yellow_concrete_stairs',
+                                'yellow_wool_stairs'],
+                     'Slabs': ['black_concrete_slab',
+                               'black_wool_slab',
+                               'blue_concrete_slab',
+                               'blue_wool_slab',
+                               'brown_concrete_slab',
+                               'brown_wool_slab',
+                               'cinnabar_brick_slab',
+                               'cinnabar_slab',
+                               'cyan_concrete_slab',
+                               'cyan_wool_slab',
+                               'gray_concrete_slab',
+                               'gray_wool_slab',
+                               'green_concrete_slab',
+                               'green_wool_slab',
+                               'light_blue_concrete_slab',
+                               'light_blue_wool_slab',
+                               'light_gray_concrete_slab',
+                               'light_gray_wool_slab',
+                               'lime_concrete_slab',
+                               'lime_wool_slab',
+                               'magenta_concrete_slab',
+                               'magenta_wool_slab',
+                               'orange_concrete_slab',
+                               'orange_wool_slab',
+                               'pink_concrete_slab',
+                               'pink_wool_slab',
+                               'polished_cinnabar_slab',
+                               'polished_sulfur_slab',
+                               'poplar_slab',
+                               'purple_concrete_slab',
+                               'purple_wool_slab',
+                               'red_concrete_slab',
+                               'red_wool_slab',
+                               'stone_slab',
+                               'sulfur_brick_slab',
+                               'sulfur_slab',
+                               'white_concrete_slab',
+                               'white_wool_slab',
+                               'yellow_concrete_slab',
+                               'yellow_wool_slab',
+                               'acacia_slab',
+                               'andesite_slab',
+                               'bamboo_mosaic_slab',
+                               'bamboo_slab',
+                               'birch_slab',
+                               'blackstone_slab',
+                               'brick_slab',
+                               'cherry_slab',
+                               'cobbled_deepslate_slab',
+                               'cobblestone_slab',
+                               'crimson_slab',
+                               'cut_copper_slab',
+                               'cut_red_sandstone_slab',
+                               'cut_sandstone_slab',
+                               'dark_oak_slab',
+                               'dark_prismarine_slab',
+                               'deepslate_brick_slab',
+                               'deepslate_tile_slab',
+                               'diorite_slab',
+                               'end_stone_brick_slab',
+                               'exposed_cut_copper_slab',
+                               'granite_slab',
+                               'jungle_slab',
+                               'mangrove_slab',
+                               'mossy_cobblestone_slab',
+                               'mossy_stone_brick_slab',
+                               'mud_brick_slab',
+                               'nether_brick_slab',
+                               'normal_stone_slab',
+                               'oak_slab',
+                               'oxidized_cut_copper_slab',
+                               'pale_oak_slab',
+                               'polished_andesite_slab',
+                               'polished_blackstone_brick_slab',
+                               'polished_blackstone_slab',
+                               'polished_deepslate_slab',
+                               'polished_diorite_slab',
+                               'polished_granite_slab',
+                               'polished_tuff_slab',
+                               'prismarine_brick_slab',
+                               'prismarine_slab',
+                               'purpur_slab',
+                               'quartz_slab',
+                               'red_nether_brick_slab',
+                               'red_sandstone_slab',
+                               'resin_brick_slab',
+                               'sandstone_slab',
+                               'smooth_quartz_slab',
+                               'smooth_red_sandstone_slab',
+                               'smooth_sandstone_slab',
+                               'smooth_stone_slab',
+                               'spruce_slab',
+                               'stone_brick_slab',
+                               'tuff_brick_slab',
+                               'tuff_slab',
+                               'warped_slab',
+                               'waxed_cut_copper_slab',
+                               'waxed_exposed_cut_copper_slab',
+                               'waxed_oxidized_cut_copper_slab',
+                               'waxed_weathered_cut_copper_slab',
+                               'weathered_cut_copper_slab'],
+                     'Walls': ['cobblestone_wall',
+                               'mossy_cobblestone_wall',
+                               'granite_wall',
+                               'diorite_wall',
+                               'andesite_wall',
+                               'sandstone_wall',
+                               'red_sandstone_wall',
+                               'stone_brick_wall',
+                               'mossy_stone_brick_wall',
+                               'brick_wall',
+                               'nether_brick_wall',
+                               'red_nether_brick_wall',
+                               'end_stone_brick_wall',
+                               'prismarine_wall',
+                               'blackstone_wall',
+                               'polished_blackstone_wall',
+                               'polished_blackstone_brick_wall',
+                               'cobbled_deepslate_wall',
+                               'deepslate_tile_wall',
+                               'polished_deepslate_wall',
+                               'deepslate_brick_wall',
+                               'tuff_wall',
+                               'tuff_brick_wall',
+                               'polished_tuff_wall',
+                               'mud_brick_wall',
+                               'resin_brick_wall',
+                               'cinnabar_brick_wall',
+                               'cinnabar_wall',
+                               'polished_cinnabar_wall',
+                               'polished_sulfur_wall',
+                               'sulfur_brick_wall',
+                               'sulfur_wall'],
+                     'Fences': ['oak_fence',
+                                'spruce_fence',
+                                'birch_fence',
+                                'jungle_fence',
+                                'acacia_fence',
+                                'dark_oak_fence',
+                                'mangrove_fence',
+                                'cherry_fence',
+                                'pale_oak_fence',
+                                'bamboo_fence',
+                                'nether_brick_fence',
+                                'crimson_fence',
+                                'warped_fence',
+                                'poplar_fence'],
+                     'Fence_Gates': ['spruce_fence_gate',
+                                     'birch_fence_gate',
+                                     'jungle_fence_gate',
+                                     'acacia_fence_gate',
+                                     'dark_oak_fence_gate',
+                                     'mangrove_fence_gate',
+                                     'cherry_fence_gate',
+                                     'pale_oak_fence_gate',
+                                     'bamboo_fence_gate',
+                                     'crimson_fence_gate',
+                                     'warped_fence_gate',
+                                     'poplar_fence_gate',
+                                     'fence_gate'],
+                     'Doors': ['wooden_door',
+                               'spruce_door',
+                               'birch_door',
+                               'jungle_door',
+                               'acacia_door',
+                               'dark_oak_door',
+                               'mangrove_door',
+                               'cherry_door',
+                               'pale_oak_door',
+                               'bamboo_door',
+                               'iron_door',
+                               'crimson_door',
+                               'warped_door',
+                               'copper_door',
+                               'exposed_copper_door',
+                               'weathered_copper_door',
+                               'oxidized_copper_door',
+                               'waxed_copper_door',
+                               'waxed_exposed_copper_door',
+                               'waxed_weathered_copper_door',
+                               'waxed_oxidized_copper_door',
+                               'poplar_door'],
+                     'Trapdoors': ['trapdoor',
+                                   'spruce_trapdoor',
+                                   'birch_trapdoor',
+                                   'jungle_trapdoor',
+                                   'acacia_trapdoor',
+                                   'dark_oak_trapdoor',
+                                   'mangrove_trapdoor',
+                                   'cherry_trapdoor',
+                                   'pale_oak_trapdoor',
+                                   'bamboo_trapdoor',
+                                   'iron_trapdoor',
+                                   'crimson_trapdoor',
+                                   'warped_trapdoor',
+                                   'copper_trapdoor',
+                                   'exposed_copper_trapdoor',
+                                   'weathered_copper_trapdoor',
+                                   'oxidized_copper_trapdoor',
+                                   'waxed_copper_trapdoor',
+                                   'waxed_exposed_copper_trapdoor',
+                                   'waxed_weathered_copper_trapdoor',
+                                   'waxed_oxidized_copper_trapdoor',
+                                   'poplar_trapdoor'],
+                     'Glass': ['glass', 'tinted_glass'],
+                     'Stained_Glass': ['white_stained_glass',
+                                       'light_gray_stained_glass',
+                                       'gray_stained_glass',
+                                       'black_stained_glass',
+                                       'brown_stained_glass',
+                                       'red_stained_glass',
+                                       'orange_stained_glass',
+                                       'yellow_stained_glass',
+                                       'lime_stained_glass',
+                                       'green_stained_glass',
+                                       'cyan_stained_glass',
+                                       'light_blue_stained_glass',
+                                       'blue_stained_glass',
+                                       'purple_stained_glass',
+                                       'magenta_stained_glass',
+                                       'pink_stained_glass'],
+                     'Glass_Panes': ['white_stained_glass_pane',
+                                     'light_gray_stained_glass_pane',
+                                     'gray_stained_glass_pane',
+                                     'black_stained_glass_pane',
+                                     'brown_stained_glass_pane',
+                                     'red_stained_glass_pane',
+                                     'orange_stained_glass_pane',
+                                     'yellow_stained_glass_pane',
+                                     'lime_stained_glass_pane',
+                                     'green_stained_glass_pane',
+                                     'cyan_stained_glass_pane',
+                                     'light_blue_stained_glass_pane',
+                                     'blue_stained_glass_pane',
+                                     'purple_stained_glass_pane',
+                                     'magenta_stained_glass_pane',
+                                     'pink_stained_glass_pane',
+                                     'glass_pane'],
+                     'Wool': ['white_wool',
+                              'light_gray_wool',
+                              'gray_wool',
+                              'black_wool',
+                              'brown_wool',
+                              'red_wool',
+                              'orange_wool',
+                              'yellow_wool',
+                              'lime_wool',
+                              'green_wool',
+                              'cyan_wool',
+                              'light_blue_wool',
+                              'blue_wool',
+                              'purple_wool',
+                              'magenta_wool',
+                              'pink_wool'],
+                     'Carpets': ['white_carpet',
+                                 'light_gray_carpet',
+                                 'gray_carpet',
+                                 'black_carpet',
+                                 'brown_carpet',
+                                 'red_carpet',
+                                 'orange_carpet',
+                                 'yellow_carpet',
+                                 'lime_carpet',
+                                 'green_carpet',
+                                 'cyan_carpet',
+                                 'light_blue_carpet',
+                                 'blue_carpet',
+                                 'purple_carpet',
+                                 'magenta_carpet',
+                                 'pink_carpet',
+                                 'moss_carpet',
+                                 'pale_moss_carpet'],
+                     'Concrete': ['white_concrete',
+                                  'light_gray_concrete',
+                                  'gray_concrete',
+                                  'black_concrete',
+                                  'brown_concrete',
+                                  'red_concrete',
+                                  'orange_concrete',
+                                  'yellow_concrete',
+                                  'lime_concrete',
+                                  'green_concrete',
+                                  'cyan_concrete',
+                                  'light_blue_concrete',
+                                  'blue_concrete',
+                                  'purple_concrete',
+                                  'magenta_concrete',
+                                  'pink_concrete'],
+                     'Concrete_Powder': ['white_concrete_powder',
+                                         'light_gray_concrete_powder',
+                                         'gray_concrete_powder',
+                                         'black_concrete_powder',
+                                         'brown_concrete_powder',
+                                         'red_concrete_powder',
+                                         'orange_concrete_powder',
+                                         'yellow_concrete_powder',
+                                         'lime_concrete_powder',
+                                         'green_concrete_powder',
+                                         'cyan_concrete_powder',
+                                         'light_blue_concrete_powder',
+                                         'blue_concrete_powder',
+                                         'purple_concrete_powder',
+                                         'magenta_concrete_powder',
+                                         'pink_concrete_powder'],
+                     'Terracotta': ['white_terracotta',
+                                    'light_gray_terracotta',
+                                    'gray_terracotta',
+                                    'black_terracotta',
+                                    'brown_terracotta',
+                                    'red_terracotta',
+                                    'orange_terracotta',
+                                    'yellow_terracotta',
+                                    'lime_terracotta',
+                                    'green_terracotta',
+                                    'cyan_terracotta',
+                                    'light_blue_terracotta',
+                                    'blue_terracotta',
+                                    'purple_terracotta',
+                                    'magenta_terracotta',
+                                    'pink_terracotta',
+                                    'hardened_clay'],
+                     'Glazed_Terracotta': ['white_glazed_terracotta',
+                                           'silver_glazed_terracotta',
+                                           'gray_glazed_terracotta',
+                                           'black_glazed_terracotta',
+                                           'brown_glazed_terracotta',
+                                           'red_glazed_terracotta',
+                                           'orange_glazed_terracotta',
+                                           'yellow_glazed_terracotta',
+                                           'lime_glazed_terracotta',
+                                           'green_glazed_terracotta',
+                                           'cyan_glazed_terracotta',
+                                           'light_blue_glazed_terracotta',
+                                           'blue_glazed_terracotta',
+                                           'purple_glazed_terracotta',
+                                           'magenta_glazed_terracotta',
+                                           'pink_glazed_terracotta'],
+                     'Bricks': ['stone_bricks',
+                                'mossy_stone_bricks',
+                                'cracked_stone_bricks',
+                                'chiseled_stone_bricks',
+                                'end_bricks',
+                                'polished_blackstone_bricks',
+                                'cracked_polished_blackstone_bricks',
+                                'deepslate_bricks',
+                                'tuff_bricks',
+                                'cracked_deepslate_bricks',
+                                'chiseled_tuff_bricks',
+                                'quartz_bricks',
+                                'prismarine_bricks',
+                                'resin_bricks',
+                                'chiseled_resin_bricks',
+                                'chiseled_nether_bricks',
+                                'cracked_nether_bricks',
+                                'mud_bricks',
+                                'cinnabar_bricks',
+                                'sulfur_bricks',
+                                'brick_block',
+                                'nether_brick',
+                                'red_nether_brick'],
+                     'Blackstone': ['gilded_blackstone',
+                                    'chiseled_polished_blackstone',
+                                    'blackstone',
+                                    'polished_blackstone'],
+                     'Basalt': ['basalt', 'polished_basalt', 'smooth_basalt'],
+                     'Tuff': ['chiseled_tuff', 'tuff', 'polished_tuff'],
+                     'Copper_Blocks': ['copper_block',
+                                       'weathered_copper',
+                                       'exposed_copper',
+                                       'oxidized_copper',
+                                       'raw_copper_block',
+                                       'waxed_weathered_chiseled_copper',
+                                       'weathered_chiseled_copper',
+                                       'waxed_oxidized_chiseled_copper',
+                                       'waxed_chiseled_copper',
+                                       'exposed_chiseled_copper',
+                                       'chiseled_copper',
+                                       'waxed_exposed_chiseled_copper',
+                                       'oxidized_chiseled_copper',
+                                       'waxed_weathered_copper',
+                                       'oxidized_cut_copper',
+                                       'weathered_copper_grate',
+                                       'waxed_weathered_cut_copper',
+                                       'exposed_cut_copper',
+                                       'oxidized_copper_grate',
+                                       'weathered_cut_copper',
+                                       'waxed_exposed_copper_grate',
+                                       'copper_grate',
+                                       'waxed_oxidized_copper_grate',
+                                       'waxed_exposed_copper',
+                                       'exposed_copper_grate',
+                                       'waxed_oxidized_copper',
+                                       'cut_copper',
+                                       'waxed_weathered_copper_grate',
+                                       'waxed_copper',
+                                       'waxed_oxidized_cut_copper',
+                                       'waxed_copper_grate',
+                                       'waxed_cut_copper',
+                                       'waxed_exposed_cut_copper'],
+                     'Amethyst_Blocks': ['amethyst_block'],
+                     'Prismarine': ['prismarine', 'dark_prismarine'],
+                     'Quartz': ['quartz_block',
+                                'chiseled_quartz_block',
+                                'quartz_pillar',
+                                'smooth_quartz'],
+                     'Purpur': ['purpur_block', 'purpur_pillar'],
+                     'Bamboo_Blocks': ['bamboo_block', 'stripped_bamboo_block', 'bamboo_mosaic'],
+                     'Mineral_&_Metal_Blocks': ['coal_block',
+                                                'iron_block',
+                                                'gold_block',
+                                                'emerald_block',
+                                                'diamond_block',
+                                                'lapis_block',
+                                                'raw_iron_block',
+                                                'raw_gold_block',
+                                                'netherite_block'],
+                     'Organic_&_Storage_Blocks': ['dried_kelp_block',
+                                                  'honey_block',
+                                                  'honeycomb_block',
+                                                  'resin_block',
+                                                  'hay_block',
+                                                  'bone_block',
+                                                  'slime'],
+                     'Cinnabar_&_Sulfur': ['chiseled_cinnabar',
+                                           'chiseled_sulfur',
+                                           'cinnabar',
+                                           'polished_cinnabar',
+                                           'polished_sulfur',
+                                           'potent_sulfur',
+                                           'sulfur'],
+                     'Bars': ['waxed_copper_bars',
+                              'waxed_oxidized_copper_bars',
+                              'weathered_copper_bars',
+                              'copper_bars',
+                              'iron_bars',
+                              'waxed_exposed_copper_bars',
+                              'waxed_weathered_copper_bars',
+                              'oxidized_copper_bars',
+                              'exposed_copper_bars'],
+                     'Wooden_Blocks': ['bookshelf'],
+                     'Stone_&_Masonry': ['chiseled_sandstone',
+                                         'cut_sandstone',
+                                         'cobbled_deepslate',
+                                         'cut_red_sandstone',
+                                         'red_sandstone',
+                                         'granite',
+                                         'polished_deepslate',
+                                         'smooth_red_sandstone',
+                                         'polished_andesite',
+                                         'deepslate_tiles',
+                                         'smooth_sandstone',
+                                         'deepslate',
+                                         'stone',
+                                         'smooth_stone',
+                                         'polished_diorite',
+                                         'chiseled_deepslate',
+                                         'sandstone',
+                                         'andesite',
+                                         'polished_granite',
+                                         'cobblestone',
+                                         'cracked_deepslate_tiles',
+                                         'reinforced_deepslate',
+                                         'diorite',
+                                         'chiseled_red_sandstone',
+                                         'mossy_cobblestone',
+                                         'packed_mud']},
+ 'Natural Blocks': {'Logs': ['oak_log',
+                             'stripped_oak_log',
+                             'spruce_log',
+                             'stripped_spruce_log',
+                             'birch_log',
+                             'stripped_birch_log',
+                             'jungle_log',
+                             'stripped_jungle_log',
+                             'acacia_log',
+                             'stripped_acacia_log',
+                             'dark_oak_log',
+                             'stripped_dark_oak_log',
+                             'mangrove_log',
+                             'stripped_mangrove_log',
+                             'cherry_log',
+                             'stripped_cherry_log',
+                             'pale_oak_log',
+                             'stripped_pale_oak_log',
+                             'crimson_stem',
+                             'stripped_crimson_stem',
+                             'warped_stem',
+                             'stripped_warped_stem',
+                             'crimson_hyphae',
+                             'stripped_crimson_hyphae',
+                             'warped_hyphae',
+                             'stripped_warped_hyphae',
+                             'poplar_log',
+                             'stripped_poplar_log'],
+                    'Wood': ['oak_wood',
+                             'spruce_wood',
+                             'birch_wood',
+                             'jungle_wood',
+                             'acacia_wood',
+                             'dark_oak_wood',
+                             'mangrove_wood',
+                             'cherry_wood',
+                             'pale_oak_wood',
+                             'poplar_wood'],
+                    'Stripped_Wood': ['stripped_oak_wood',
+                                      'stripped_spruce_wood',
+                                      'stripped_birch_wood',
+                                      'stripped_jungle_wood',
+                                      'stripped_acacia_wood',
+                                      'stripped_dark_oak_wood',
+                                      'stripped_mangrove_wood',
+                                      'stripped_cherry_wood',
+                                      'stripped_pale_oak_wood',
+                                      'stripped_poplar_wood'],
+                    'Leaves': ['oak_leaves',
+                               'spruce_leaves',
+                               'birch_leaves',
+                               'jungle_leaves',
+                               'acacia_leaves',
+                               'dark_oak_leaves',
+                               'mangrove_leaves',
+                               'cherry_leaves',
+                               'pale_oak_leaves',
+                               'azalea_leaves',
+                               'azalea_leaves_flowered',
+                               'orange_poplar_leaves',
+                               'red_poplar_leaves',
+                               'yellow_poplar_leaves'],
+                    'Saplings': ['oak_sapling',
+                                 'spruce_sapling',
+                                 'birch_sapling',
+                                 'jungle_sapling',
+                                 'acacia_sapling',
+                                 'dark_oak_sapling',
+                                 'mangrove_propagule',
+                                 'cherry_sapling',
+                                 'pale_oak_sapling',
+                                 'poplar_sapling'],
+                    'Plants': ['golden_dandelion',
+                               'red_shrub',
+                               'peony',
+                               'orange_tulip',
+                               'sugar_cane',
+                               'lily_of_the_valley',
+                               'azure_bluet',
+                               'open_eyeblossom',
+                               'wildflowers',
+                               'cactus_flower',
+                               'azalea',
+                               'big_dripleaf',
+                               'red_mushroom',
+                               'wither_rose',
+                               'crimson_roots',
+                               'cactus',
+                               'oxeye_daisy',
+                               'spore_blossom',
+                               'blue_orchid',
+                               'fern',
+                               'pink_petals',
+                               'torchflower',
+                               'large_fern',
+                               'glow_lichen',
+                               'poppy',
+                               'white_tulip',
+                               'rose_bush',
+                               'tall_dry_grass',
+                               'lilac',
+                               'cornflower',
+                               'vine',
+                               'red_tulip',
+                               'firefly_bush',
+                               'sea_pickle',
+                               'dandelion',
+                               'sunflower',
+                               'brown_mushroom',
+                               'waterlily',
+                               'seagrass',
+                               'bush',
+                               'short_dry_grass',
+                               'closed_eyeblossom',
+                               'kelp',
+                               'pink_tulip',
+                               'bamboo',
+                               'crimson_fungus',
+                               'deadbush',
+                               'weeping_vines',
+                               'tall_grass',
+                               'twisting_vines',
+                               'pitcher_plant',
+                               'short_grass',
+                               'flowering_azalea',
+                               'allium',
+                               'warped_roots',
+                               'warped_fungus',
+                               'nether_sprouts',
+                               'chorus_flower',
+                               'chorus_plant'],
+                    'Mushroom_Blocks': ['mushroom_stem',
+                                        'brown_mushroom_block:14',
+                                        'red_mushroom_block:14'],
+                    'Ores': ['iron_ore',
+                             'gold_ore',
+                             'diamond_ore',
+                             'lapis_ore',
+                             'redstone_ore',
+                             'coal_ore',
+                             'copper_ore',
+                             'emerald_ore',
+                             'quartz_ore',
+                             'nether_gold_ore',
+                             'deepslate_iron_ore',
+                             'deepslate_gold_ore',
+                             'deepslate_diamond_ore',
+                             'deepslate_lapis_ore',
+                             'deepslate_redstone_ore',
+                             'deepslate_emerald_ore',
+                             'deepslate_coal_ore',
+                             'deepslate_copper_ore',
+                             'ancient_debris'],
+                    'Terrain_Blocks': ['grass_block',
+                                       'dripstone_block',
+                                       'moss_block',
+                                       'pale_moss_block',
+                                       'small_dripleaf_block',
+                                       'bedrock',
+                                       'soul_soil',
+                                       'soul_sand',
+                                       'wet_sponge',
+                                       'calcite',
+                                       'netherrack',
+                                       'sponge',
+                                       'blue_ice',
+                                       'obsidian',
+                                       'gravel',
+                                       'end_stone',
+                                       'snow',
+                                       'sand',
+                                       'dirt',
+                                       'crying_obsidian',
+                                       'dirt_with_roots',
+                                       'clay',
+                                       'packed_ice',
+                                       'red_sand',
+                                       'coarse_dirt',
+                                       'ice',
+                                       'podzol',
+                                       'mud',
+                                       'mycelium'],
+                    'Nether_Natural_Blocks': ['crimson_nylium',
+                                              'warped_nylium',
+                                              'nether_wart_block',
+                                              'warped_wart_block',
+                                              'magma_block'],
+                    'Coral': ['fire_coral',
+                              'brain_coral',
+                              'bubble_coral',
+                              'tube_coral',
+                              'horn_coral',
+                              'fire_coral_fan',
+                              'brain_coral_fan',
+                              'bubble_coral_fan',
+                              'tube_coral_fan',
+                              'horn_coral_fan'],
+                    'Dead_Coral': ['dead_horn_coral',
+                                   'dead_horn_coral_fan',
+                                   'dead_fire_coral',
+                                   'dead_brain_coral',
+                                   'dead_bubble_coral',
+                                   'dead_tube_coral',
+                                   'dead_fire_coral_fan',
+                                   'dead_brain_coral_fan',
+                                   'dead_bubble_coral_fan',
+                                   'dead_tube_coral_fan'],
+                    'Coral_Blocks': ['tube_coral_block',
+                                     'brain_coral_block',
+                                     'bubble_coral_block',
+                                     'fire_coral_block',
+                                     'horn_coral_block'],
+                    'Dead_Coral_Blocks': ['dead_tube_coral_block',
+                                          'dead_brain_coral_block',
+                                          'dead_bubble_coral_block',
+                                          'dead_fire_coral_block',
+                                          'dead_horn_coral_block'],
+                    'Sculk': ['sculk_catalyst', 'sculk', 'sculk_shrieker', 'sculk_vein', 'sculk_sensor'],
+                    'Amethyst': ['amethyst_cluster',
+                                 'medium_amethyst_bud',
+                                 'small_amethyst_bud',
+                                 'large_amethyst_bud',
+                                 'budding_amethyst'],
+                    'Natural_Features': ['bee_nest',
+                                         'pointed_dripstone',
+                                         'mangrove_roots',
+                                         'pale_hanging_moss',
+                                         'leaf_litter',
+                                         'hanging_roots',
+                                         'creaking_heart',
+                                         'dried_ghast',
+                                         'muddy_mangrove_roots',
+                                         'web'],
+                    'Egg_Blocks': ['dragon_egg', 'frog_spawn', 'sniffer_egg', 'turtle_egg'],
+                    'Archaeology_Blocks': ['suspicious_sand', 'suspicious_gravel'],
+                    'Infested_Blocks': ['infested_cobblestone',
+                                        'infested_stone',
+                                        'infested_deepslate',
+                                        'infested_stone_bricks',
+                                        'infested_mossy_stone_bricks',
+                                        'infested_cracked_stone_bricks',
+                                        'infested_chiseled_stone_bricks']},
+ 'Functional Blocks': {'Crafting_&_Workstations': ['crafting_table',
+                                                   'cartography_table',
+                                                   'fletching_table',
+                                                   'grindstone',
+                                                   'lectern',
+                                                   'loom',
+                                                   'smithing_table',
+                                                   'stonecutter'],
+                       'Furnaces': ['furnace', 'blast_furnace', 'smoker'],
+                       'Anvils': ['anvil', 'chipped_anvil', 'damaged_anvil'],
+                       'Utility_Blocks': ['beacon',
+                                          'conduit',
+                                          'vault',
+                                          'bell',
+                                          'chiseled_bookshelf',
+                                          'lodestone'],
+                       'Spawners': ['mob_spawner', 'trial_spawner'],
+                       'Portal_&_Respawn': ['end_portal_frame', 'respawn_anchor'],
+                       'Climbing': ['scaffolding', 'ladder'],
+                       'Sound_Blocks': ['jukebox', 'noteblock'],
+                       'Lighting': ['lit_pumpkin',
+                                    'end_rod',
+                                    'torch',
+                                    'sea_lantern',
+                                    'soul_torch',
+                                    'soul_campfire',
+                                    'verdant_froglight',
+                                    'copper_torch',
+                                    'soul_lantern',
+                                    'shroomlight',
+                                    'glowstone',
+                                    'ochre_froglight',
+                                    'lantern',
+                                    'pearlescent_froglight',
+                                    'campfire',
+                                    'oxidized_copper_lantern',
+                                    'copper_lantern',
+                                    'weathered_copper_lantern',
+                                    'waxed_copper_lantern',
+                                    'waxed_weathered_copper_lantern',
+                                    'waxed_exposed_copper_lantern',
+                                    'waxed_oxidized_copper_lantern',
+                                    'exposed_copper_lantern']},
+ 'Redstone': {'Components': ['redstone'],
+              'Power_Sources': ['redstone_block'],
+              'Logic_&_Controls': ['redstone_torch',
+                                   'lever',
+                                   'observer',
+                                   'repeater',
+                                   'comparator',
+                                   'target',
+                                   'calibrated_sculk_sensor',
+                                   'daylight_detector',
+                                   'tripwire_hook',
+                                   'crafter'],
+              'Buttons': ['polished_blackstone_button',
+                          'wooden_button',
+                          'spruce_button',
+                          'birch_button',
+                          'jungle_button',
+                          'acacia_button',
+                          'dark_oak_button',
+                          'mangrove_button',
+                          'cherry_button',
+                          'pale_oak_button',
+                          'bamboo_button',
+                          'stone_button',
+                          'crimson_button',
+                          'warped_button',
+                          'poplar_button'],
+              'Pressure_Plates': ['polished_blackstone_pressure_plate',
+                                  'wooden_pressure_plate',
+                                  'spruce_pressure_plate',
+                                  'birch_pressure_plate',
+                                  'jungle_pressure_plate',
+                                  'acacia_pressure_plate',
+                                  'dark_oak_pressure_plate',
+                                  'mangrove_pressure_plate',
+                                  'cherry_pressure_plate',
+                                  'pale_oak_pressure_plate',
+                                  'bamboo_pressure_plate',
+                                  'crimson_pressure_plate',
+                                  'warped_pressure_plate',
+                                  'stone_pressure_plate',
+                                  'light_weighted_pressure_plate',
+                                  'heavy_weighted_pressure_plate',
+                                  'poplar_pressure_plate'],
+              'Pistons': ['piston', 'sticky_piston'],
+              'Transfer_&_Dispensing': ['hopper', 'dropper', 'dispenser'],
+              'TNT': ['tnt'],
+              'Lighting': ['redstone_lamp',
+                           'waxed_oxidized_copper_bulb',
+                           'waxed_copper_bulb',
+                           'oxidized_copper_bulb',
+                           'waxed_weathered_copper_bulb',
+                           'exposed_copper_bulb',
+                           'weathered_copper_bulb',
+                           'waxed_exposed_copper_bulb',
+                           'copper_bulb'],
+              'Lightning_Rods': ['lightning_rod',
+                                 'exposed_lightning_rod',
+                                 'weathered_lightning_rod',
+                                 'oxidized_lightning_rod',
+                                 'waxed_lightning_rod',
+                                 'waxed_exposed_lightning_rod',
+                                 'waxed_weathered_lightning_rod',
+                                 'waxed_oxidized_lightning_rod']},
+ 'Transportation': {'Rails': ['rail', 'golden_rail', 'detector_rail', 'activator_rail'],
+                    'Minecarts': ['hopper_minecart', 'chest_minecart', 'tnt_minecart', 'minecart'],
+                    'Boats': ['oak_boat',
+                              'spruce_boat',
+                              'birch_boat',
+                              'jungle_boat',
+                              'acacia_boat',
+                              'dark_oak_boat',
+                              'mangrove_boat',
+                              'cherry_boat',
+                              'pale_oak_boat',
+                              'bamboo_raft',
+                              'oak_chest_boat',
+                              'spruce_chest_boat',
+                              'birch_chest_boat',
+                              'jungle_chest_boat',
+                              'acacia_chest_boat',
+                              'dark_oak_chest_boat',
+                              'mangrove_chest_boat',
+                              'cherry_chest_boat',
+                              'pale_oak_chest_boat',
+                              'bamboo_chest_raft',
+                              'poplar_boat',
+                              'poplar_chest_boat'],
+                    'Animal_Controls': ['carrot_on_a_stick', 'saddle', 'warped_fungus_on_a_stick']},
+ 'Farming & Food': {'Seeds_&_Farming_Supplies': ['wheat_seeds',
+                                                 'pumpkin_seeds',
+                                                 'melon_seeds',
+                                                 'beetroot_seeds',
+                                                 'torchflower_seeds',
+                                                 'pitcher_pod',
+                                                 'bone_meal'],
+                    'Crops': ['melon_block',
+                              'wheat',
+                              'beetroot',
+                              'potato',
+                              'carrot',
+                              'pumpkin',
+                              'carved_pumpkin',
+                              'cocoa_beans',
+                              'nether_wart'],
+                    'Raw_Food': ['beef',
+                                 'rabbit',
+                                 'cod',
+                                 'pufferfish',
+                                 'salmon',
+                                 'tropical_fish',
+                                 'porkchop',
+                                 'chicken',
+                                 'mutton'],
+                    'Cooked_Food': ['baked_potato',
+                                    'cooked_chicken',
+                                    'cooked_porkchop',
+                                    'cooked_beef',
+                                    'cooked_mutton',
+                                    'cooked_rabbit',
+                                    'cooked_salmon',
+                                    'cooked_cod',
+                                    'dried_kelp'],
+                    'Other_Food': ['golden_carrot',
+                                   'melon_slice',
+                                   'beetroot_soup',
+                                   'pumpkin_pie',
+                                   'golden_apple',
+                                   'enchanted_golden_apple',
+                                   'bread',
+                                   'mushroom_stew',
+                                   'rabbit_stew',
+                                   'cake',
+                                   'suspicious_stew',
+                                   'chorus_fruit',
+                                   'glow_berries',
+                                   'sweet_berries',
+                                   'apple',
+                                   'cookie',
+                                   'honey_bottle',
+                                   'poisonous_potato'],
+                    'Eggs': ['brown_egg', 'blue_egg', 'egg'],
+                    'Farming_Blocks': ['composter', 'farmland', 'beehive']},
+ 'Tools & Utilities': {'Axes': ['wooden_axe',
+                                'stone_axe',
+                                'copper_axe',
+                                'iron_axe',
+                                'golden_axe',
+                                'diamond_axe',
+                                'netherite_axe'],
+                       'Pickaxes': ['wooden_pickaxe',
+                                    'stone_pickaxe',
+                                    'copper_pickaxe',
+                                    'iron_pickaxe',
+                                    'golden_pickaxe',
+                                    'diamond_pickaxe',
+                                    'netherite_pickaxe'],
+                       'Shovels': ['wooden_shovel',
+                                   'stone_shovel',
+                                   'copper_shovel',
+                                   'iron_shovel',
+                                   'golden_shovel',
+                                   'diamond_shovel',
+                                   'netherite_shovel'],
+                       'Hoes': ['wooden_hoe',
+                                'stone_hoe',
+                                'copper_hoe',
+                                'iron_hoe',
+                                'golden_hoe',
+                                'diamond_hoe',
+                                'netherite_hoe'],
+                       'Utilities': ['spyglass',
+                                     'fishing_rod',
+                                     'map',
+                                     'flint_and_steel',
+                                     'lead',
+                                     'brush',
+                                     'recovery_compass',
+                                     'shears',
+                                     'compass',
+                                     'clock',
+                                     'lodestone_compass',
+                                     'name_tag'],
+                       'Mobility': ['elytra'],
+                       'Books_&_Maps': ['writable_book', 'empty_map:2', 'empty_map', 'written_book'],
+                       'Buckets': ['milk_bucket',
+                                   'water_bucket',
+                                   'lava_bucket',
+                                   'cod_bucket',
+                                   'salmon_bucket',
+                                   'tropical_fish_bucket',
+                                   'pufferfish_bucket',
+                                   'powder_snow_bucket',
+                                   'axolotl_bucket',
+                                   'tadpole_bucket',
+                                   'bucket'],
+                       'Goat_Horns': ['goat_horn',
+                                      'goat_horn:1',
+                                      'goat_horn:2',
+                                      'goat_horn:3',
+                                      'goat_horn:4',
+                                      'goat_horn:5',
+                                      'goat_horn:6',
+                                      'goat_horn:7'],
+                       'Adventure_Items': ['ender_eye', 'ominous_trial_key', 'trial_key', 'end_crystal'],
+                       'Fireworks': ['firework_rocket:0',
+                                     'firework_rocket:8',
+                                     'firework_rocket:7',
+                                     'firework_rocket:15',
+                                     'firework_rocket:12',
+                                     'firework_rocket:14',
+                                     'firework_rocket:1',
+                                     'firework_rocket:4',
+                                     'firework_rocket:5',
+                                     'firework_rocket:13',
+                                     'firework_rocket:9',
+                                     'firework_rocket:3',
+                                     'firework_rocket:11',
+                                     'firework_rocket:10',
+                                     'firework_rocket:2',
+                                     'firework_rocket:6',
+                                     'firework_rocket'],
+                       'Firework_Stars': ['firework_star:0',
+                                          'firework_star:8',
+                                          'firework_star:7',
+                                          'firework_star:15',
+                                          'firework_star:12',
+                                          'firework_star:14',
+                                          'firework_star:1',
+                                          'firework_star:4',
+                                          'firework_star:5',
+                                          'firework_star:13',
+                                          'firework_star:9',
+                                          'firework_star:3',
+                                          'firework_star:11',
+                                          'firework_star:10',
+                                          'firework_star:2',
+                                          'firework_star:6']},
+ 'Combat': {'Swords': ['wooden_sword',
+                       'stone_sword',
+                       'copper_sword',
+                       'iron_sword',
+                       'golden_sword',
+                       'diamond_sword',
+                       'netherite_sword'],
+            'Spears': ['copper_spear',
+                       'diamond_spear',
+                       'golden_spear',
+                       'iron_spear',
+                       'netherite_spear',
+                       'stone_spear',
+                       'wooden_spear'],
+            'Weapons': ['bow', 'mace', 'crossbow', 'trident'],
+            'Defensive_Gear': ['shield', 'totem_of_undying'],
+            'Arrows': ['tipped_arrow',
+                       'arrow:16',
+                       'arrow:44',
+                       'arrow:31',
+                       'arrow:32',
+                       'arrow:38',
+                       'arrow:30',
+                       'arrow:26',
+                       'arrow:28',
+                       'arrow:6',
+                       'arrow:7',
+                       'arrow:15',
+                       'arrow:41',
+                       'arrow:23',
+                       'arrow:24',
+                       'arrow:25',
+                       'arrow:42',
+                       'arrow:11',
+                       'arrow:34',
+                       'arrow:22',
+                       'arrow:46',
+                       'arrow:9',
+                       'arrow:40',
+                       'arrow:19',
+                       'arrow:29',
+                       'arrow:21',
+                       'arrow',
+                       'arrow:17',
+                       'arrow:14',
+                       'arrow:10',
+                       'arrow:43',
+                       'arrow:8',
+                       'arrow:36',
+                       'arrow:12',
+                       'arrow:35',
+                       'arrow:45',
+                       'arrow:13',
+                       'arrow:39',
+                       'arrow:37',
+                       'arrow:27',
+                       'arrow:18',
+                       'arrow:33',
+                       'arrow:20',
+                       'arrow:47'],
+            'Projectiles': ['fire_charge', 'snowball', 'wind_charge']},
+ 'Armor': {'Helmets': ['leather_helmet',
+                       'copper_helmet',
+                       'chainmail_helmet',
+                       'iron_helmet',
+                       'golden_helmet',
+                       'diamond_helmet',
+                       'netherite_helmet',
+                       'turtle_helmet'],
+           'Chestplates': ['leather_chestplate',
+                           'copper_chestplate',
+                           'chainmail_chestplate',
+                           'iron_chestplate',
+                           'golden_chestplate',
+                           'diamond_chestplate',
+                           'netherite_chestplate'],
+           'Leggings': ['leather_leggings',
+                        'copper_leggings',
+                        'chainmail_leggings',
+                        'iron_leggings',
+                        'golden_leggings',
+                        'diamond_leggings',
+                        'netherite_leggings'],
+           'Boots': ['leather_boots',
+                     'copper_boots',
+                     'chainmail_boots',
+                     'iron_boots',
+                     'golden_boots',
+                     'diamond_boots',
+                     'netherite_boots'],
+           'Horse_Armor': ['leather_horse_armor',
+                           'copper_horse_armor',
+                           'iron_horse_armor',
+                           'golden_horse_armor',
+                           'diamond_horse_armor',
+                           'netherite_horse_armor'],
+           'Nautilus_Armor': ['copper_nautilus_armor',
+                              'diamond_nautilus_armor',
+                              'golden_nautilus_armor',
+                              'iron_nautilus_armor',
+                              'netherite_nautilus_armor'],
+           'Animal_Armor': ['wolf_armor'],
+           'Harnesses': ['black_harness',
+                         'blue_harness',
+                         'brown_harness',
+                         'cyan_harness',
+                         'gray_harness',
+                         'green_harness',
+                         'light_blue_harness',
+                         'light_gray_harness',
+                         'lime_harness',
+                         'magenta_harness',
+                         'orange_harness',
+                         'pink_harness',
+                         'purple_harness',
+                         'red_harness',
+                         'white_harness',
+                         'yellow_harness']},
+ 'Containers': {'Chests': ['chest',
+                           'trapped_chest',
+                           'ender_chest',
+                           'copper_chest',
+                           'exposed_copper_chest',
+                           'weathered_copper_chest',
+                           'oxidized_copper_chest',
+                           'waxed_copper_chest',
+                           'waxed_exposed_copper_chest',
+                           'waxed_weathered_copper_chest',
+                           'waxed_oxidized_copper_chest'],
+                'Shulker_Boxes': ['undyed_shulker_box',
+                                  'white_shulker_box',
+                                  'light_gray_shulker_box',
+                                  'gray_shulker_box',
+                                  'black_shulker_box',
+                                  'brown_shulker_box',
+                                  'red_shulker_box',
+                                  'orange_shulker_box',
+                                  'yellow_shulker_box',
+                                  'lime_shulker_box',
+                                  'green_shulker_box',
+                                  'cyan_shulker_box',
+                                  'light_blue_shulker_box',
+                                  'blue_shulker_box',
+                                  'purple_shulker_box',
+                                  'magenta_shulker_box',
+                                  'pink_shulker_box'],
+                'Bundles': ['bundle',
+                            'white_bundle',
+                            'light_gray_bundle',
+                            'gray_bundle',
+                            'black_bundle',
+                            'brown_bundle',
+                            'red_bundle',
+                            'orange_bundle',
+                            'yellow_bundle',
+                            'lime_bundle',
+                            'green_bundle',
+                            'cyan_bundle',
+                            'light_blue_bundle',
+                            'blue_bundle',
+                            'purple_bundle',
+                            'magenta_bundle',
+                            'pink_bundle'],
+                'Barrels': ['barrel'],
+                'Shelves': ['poplar_shelf',
+                            'acacia_shelf',
+                            'bamboo_shelf',
+                            'birch_shelf',
+                            'cherry_shelf',
+                            'crimson_shelf',
+                            'dark_oak_shelf',
+                            'jungle_shelf',
+                            'mangrove_shelf',
+                            'oak_shelf',
+                            'pale_oak_shelf',
+                            'spruce_shelf',
+                            'warped_shelf']},
+ 'Brewing & Enchanting': {'Equipment_&_Supplies': ['cauldron',
+                                                   'brewing_stand',
+                                                   'enchanting_table',
+                                                   'glass_bottle'],
+                          'Brewing_Ingredients': ['fermented_spider_eye',
+                                                  'blaze_powder',
+                                                  'glowstone_dust',
+                                                  'magma_cream',
+                                                  'dragon_breath',
+                                                  'glistering_melon_slice'],
+                          'Potions': ['potion',
+                                      'potion:1',
+                                      'potion:2',
+                                      'potion:3',
+                                      'potion:4',
+                                      'potion:5',
+                                      'potion:6',
+                                      'potion:7',
+                                      'potion:8',
+                                      'potion:9',
+                                      'potion:10',
+                                      'potion:11',
+                                      'potion:12',
+                                      'potion:13',
+                                      'potion:14',
+                                      'potion:15',
+                                      'potion:16',
+                                      'potion:17',
+                                      'potion:18',
+                                      'potion:19',
+                                      'potion:20',
+                                      'potion:21',
+                                      'potion:22',
+                                      'potion:23',
+                                      'potion:24',
+                                      'potion:25',
+                                      'potion:26',
+                                      'potion:27',
+                                      'potion:28',
+                                      'potion:29',
+                                      'potion:30',
+                                      'potion:31',
+                                      'potion:32',
+                                      'potion:33',
+                                      'potion:34',
+                                      'potion:35',
+                                      'potion:36',
+                                      'potion:37',
+                                      'potion:38',
+                                      'potion:39',
+                                      'potion:40',
+                                      'potion:41',
+                                      'potion:42',
+                                      'potion:43',
+                                      'potion:44',
+                                      'potion:45',
+                                      'potion:46'],
+                          'Splash_Potions': ['splash_potion',
+                                             'splash_potion:1',
+                                             'splash_potion:2',
+                                             'splash_potion:3',
+                                             'splash_potion:4',
+                                             'splash_potion:5',
+                                             'splash_potion:6',
+                                             'splash_potion:7',
+                                             'splash_potion:8',
+                                             'splash_potion:9',
+                                             'splash_potion:10',
+                                             'splash_potion:11',
+                                             'splash_potion:12',
+                                             'splash_potion:13',
+                                             'splash_potion:14',
+                                             'splash_potion:15',
+                                             'splash_potion:16',
+                                             'splash_potion:17',
+                                             'splash_potion:18',
+                                             'splash_potion:19',
+                                             'splash_potion:20',
+                                             'splash_potion:21',
+                                             'splash_potion:22',
+                                             'splash_potion:23',
+                                             'splash_potion:24',
+                                             'splash_potion:25',
+                                             'splash_potion:26',
+                                             'splash_potion:27',
+                                             'splash_potion:28',
+                                             'splash_potion:29',
+                                             'splash_potion:30',
+                                             'splash_potion:31',
+                                             'splash_potion:32',
+                                             'splash_potion:33',
+                                             'splash_potion:34',
+                                             'splash_potion:35',
+                                             'splash_potion:36',
+                                             'splash_potion:37',
+                                             'splash_potion:38',
+                                             'splash_potion:39',
+                                             'splash_potion:40',
+                                             'splash_potion:41',
+                                             'splash_potion:42',
+                                             'splash_potion:43',
+                                             'splash_potion:44',
+                                             'splash_potion:45',
+                                             'splash_potion:46'],
+                          'Lingering_Potions': ['lingering_potion',
+                                                'lingering_potion:1',
+                                                'lingering_potion:2',
+                                                'lingering_potion:3',
+                                                'lingering_potion:4',
+                                                'lingering_potion:5',
+                                                'lingering_potion:6',
+                                                'lingering_potion:7',
+                                                'lingering_potion:8',
+                                                'lingering_potion:9',
+                                                'lingering_potion:10',
+                                                'lingering_potion:11',
+                                                'lingering_potion:12',
+                                                'lingering_potion:13',
+                                                'lingering_potion:14',
+                                                'lingering_potion:15',
+                                                'lingering_potion:16',
+                                                'lingering_potion:17',
+                                                'lingering_potion:18',
+                                                'lingering_potion:19',
+                                                'lingering_potion:20',
+                                                'lingering_potion:21',
+                                                'lingering_potion:22',
+                                                'lingering_potion:23',
+                                                'lingering_potion:24',
+                                                'lingering_potion:25',
+                                                'lingering_potion:26',
+                                                'lingering_potion:27',
+                                                'lingering_potion:28',
+                                                'lingering_potion:29',
+                                                'lingering_potion:30',
+                                                'lingering_potion:31',
+                                                'lingering_potion:32',
+                                                'lingering_potion:33',
+                                                'lingering_potion:34',
+                                                'lingering_potion:35',
+                                                'lingering_potion:36',
+                                                'lingering_potion:37',
+                                                'lingering_potion:38',
+                                                'lingering_potion:39',
+                                                'lingering_potion:40',
+                                                'lingering_potion:41',
+                                                'lingering_potion:42',
+                                                'lingering_potion:43',
+                                                'lingering_potion:44',
+                                                'lingering_potion:45',
+                                                'lingering_potion:46'],
+                          'Ominous_Bottles': ['ominous_bottle:3',
+                                              'ominous_bottle:2',
+                                              'ominous_bottle:1',
+                                              'ominous_bottle:4',
+                                              'ominous_bottle'],
+                          'Enchanting_Items': ['experience_bottle'],
+                          'Enchanted_Books': ['enchanted_book',
+                                              'enchanted_book:1',
+                                              'enchanted_book:2',
+                                              'enchanted_book:3',
+                                              'enchanted_book:4',
+                                              'enchanted_book:5',
+                                              'enchanted_book:6',
+                                              'enchanted_book:7',
+                                              'enchanted_book:8',
+                                              'enchanted_book:9',
+                                              'enchanted_book:10',
+                                              'enchanted_book:11',
+                                              'enchanted_book:12',
+                                              'enchanted_book:13',
+                                              'enchanted_book:14',
+                                              'enchanted_book:15',
+                                              'enchanted_book:16',
+                                              'enchanted_book:17',
+                                              'enchanted_book:18',
+                                              'enchanted_book:19',
+                                              'enchanted_book:20',
+                                              'enchanted_book:21',
+                                              'enchanted_book:22',
+                                              'enchanted_book:23',
+                                              'enchanted_book:24',
+                                              'enchanted_book:25',
+                                              'enchanted_book:26',
+                                              'enchanted_book:27',
+                                              'enchanted_book:28',
+                                              'enchanted_book:29',
+                                              'enchanted_book:30',
+                                              'enchanted_book:31',
+                                              'enchanted_book:32',
+                                              'enchanted_book:33',
+                                              'enchanted_book:34',
+                                              'enchanted_book:35',
+                                              'enchanted_book:36',
+                                              'enchanted_book:37',
+                                              'enchanted_book:38',
+                                              'enchanted_book:39',
+                                              'enchanted_book:40',
+                                              'enchanted_book:41',
+                                              'enchanted_book:42',
+                                              'enchanted_book:43',
+                                              'enchanted_book:44',
+                                              'enchanted_book:45',
+                                              'enchanted_book:46',
+                                              'enchanted_book:47',
+                                              'enchanted_book:48',
+                                              'enchanted_book:49',
+                                              'enchanted_book:50',
+                                              'enchanted_book:51',
+                                              'enchanted_book:52',
+                                              'enchanted_book:53',
+                                              'enchanted_book:54',
+                                              'enchanted_book:55',
+                                              'enchanted_book:56',
+                                              'enchanted_book:57',
+                                              'enchanted_book:58',
+                                              'enchanted_book:59',
+                                              'enchanted_book:60',
+                                              'enchanted_book:61',
+                                              'enchanted_book:62',
+                                              'enchanted_book:63',
+                                              'enchanted_book:64',
+                                              'enchanted_book:65',
+                                              'enchanted_book:66',
+                                              'enchanted_book:67',
+                                              'enchanted_book:68',
+                                              'enchanted_book:69',
+                                              'enchanted_book:70',
+                                              'enchanted_book:71',
+                                              'enchanted_book:72',
+                                              'enchanted_book:73',
+                                              'enchanted_book:74',
+                                              'enchanted_book:75',
+                                              'enchanted_book:76',
+                                              'enchanted_book:77',
+                                              'enchanted_book:78',
+                                              'enchanted_book:79',
+                                              'enchanted_book:80',
+                                              'enchanted_book:81',
+                                              'enchanted_book:82',
+                                              'enchanted_book:83',
+                                              'enchanted_book:84',
+                                              'enchanted_book:85',
+                                              'enchanted_book:86',
+                                              'enchanted_book:87',
+                                              'enchanted_book:88',
+                                              'enchanted_book:89',
+                                              'enchanted_book:90',
+                                              'enchanted_book:91',
+                                              'enchanted_book:92',
+                                              'enchanted_book:93',
+                                              'enchanted_book:94',
+                                              'enchanted_book:95',
+                                              'enchanted_book:96',
+                                              'enchanted_book:97',
+                                              'enchanted_book:98',
+                                              'enchanted_book:99',
+                                              'enchanted_book:100',
+                                              'enchanted_book:101',
+                                              'enchanted_book:102',
+                                              'enchanted_book:103',
+                                              'enchanted_book:104',
+                                              'enchanted_book:105',
+                                              'enchanted_book:106',
+                                              'enchanted_book:107',
+                                              'enchanted_book:108',
+                                              'enchanted_book:109',
+                                              'enchanted_book:110',
+                                              'enchanted_book:111',
+                                              'enchanted_book:112',
+                                              'enchanted_book:113',
+                                              'enchanted_book:114',
+                                              'enchanted_book:115',
+                                              'enchanted_book:116',
+                                              'enchanted_book:117',
+                                              'enchanted_book:118',
+                                              'enchanted_book:119',
+                                              'enchanted_book:120',
+                                              'enchanted_book:121']},
+ 'Decorative Items': {'Beds': ['bed',
+                               'bed:8',
+                               'bed:7',
+                               'bed:15',
+                               'bed:12',
+                               'bed:14',
+                               'bed:1',
+                               'bed:4',
+                               'bed:5',
+                               'bed:13',
+                               'bed:9',
+                               'bed:3',
+                               'bed:11',
+                               'bed:10',
+                               'bed:2',
+                               'bed:6',
+                               'straw_bed'],
+                      'Banners': ['black_banner',
+                                  'gray_banner',
+                                  'light_gray_banner',
+                                  'white_banner',
+                                  'light_blue_banner',
+                                  'orange_banner',
+                                  'red_banner',
+                                  'blue_banner',
+                                  'purple_banner',
+                                  'magenta_banner',
+                                  'pink_banner',
+                                  'brown_banner',
+                                  'yellow_banner',
+                                  'lime_banner',
+                                  'green_banner',
+                                  'cyan_banner',
+                                  'ominous_banner'],
+                      'Banner_Patterns': ['creeper_banner_pattern',
+                                          'skull_banner_pattern',
+                                          'flower_banner_pattern',
+                                          'mojang_banner_pattern',
+                                          'field_masoned_banner_pattern',
+                                          'bordure_indented_banner_pattern',
+                                          'piglin_banner_pattern',
+                                          'globe_banner_pattern',
+                                          'flow_banner_pattern',
+                                          'guster_banner_pattern'],
+                      'Signs': ['oak_sign',
+                                'spruce_sign',
+                                'birch_sign',
+                                'jungle_sign',
+                                'acacia_sign',
+                                'dark_oak_sign',
+                                'mangrove_sign',
+                                'cherry_sign',
+                                'pale_oak_sign',
+                                'bamboo_sign',
+                                'crimson_sign',
+                                'warped_sign',
+                                'poplar_sign'],
+                      'Hanging_Signs': ['oak_hanging_sign',
+                                        'spruce_hanging_sign',
+                                        'birch_hanging_sign',
+                                        'jungle_hanging_sign',
+                                        'acacia_hanging_sign',
+                                        'dark_oak_hanging_sign',
+                                        'mangrove_hanging_sign',
+                                        'cherry_hanging_sign',
+                                        'pale_oak_hanging_sign',
+                                        'bamboo_hanging_sign',
+                                        'crimson_hanging_sign',
+                                        'warped_hanging_sign',
+                                        'poplar_hanging_sign'],
+                      'Candles': ['black_candle',
+                                  'blue_candle',
+                                  'brown_candle',
+                                  'cyan_candle',
+                                  'gray_candle',
+                                  'green_candle',
+                                  'light_blue_candle',
+                                  'light_gray_candle',
+                                  'lime_candle',
+                                  'magenta_candle',
+                                  'orange_candle',
+                                  'pink_candle',
+                                  'purple_candle',
+                                  'red_candle',
+                                  'white_candle',
+                                  'yellow_candle',
+                                  'candle'],
+                      'Dyes': ['white_dye',
+                               'light_gray_dye',
+                               'gray_dye',
+                               'black_dye',
+                               'brown_dye',
+                               'red_dye',
+                               'orange_dye',
+                               'yellow_dye',
+                               'lime_dye',
+                               'green_dye',
+                               'cyan_dye',
+                               'light_blue_dye',
+                               'blue_dye',
+                               'purple_dye',
+                               'magenta_dye',
+                               'pink_dye'],
+                      'Chains': ['iron_chain',
+                                 'copper_chain',
+                                 'oxidized_copper_chain',
+                                 'waxed_weathered_copper_chain',
+                                 'waxed_exposed_copper_chain',
+                                 'chain',
+                                 'exposed_copper_chain',
+                                 'waxed_copper_chain',
+                                 'waxed_oxidized_copper_chain',
+                                 'weathered_copper_chain'],
+                      'Cushions': ['black_cushion',
+                                   'blue_cushion',
+                                   'brown_cushion',
+                                   'cyan_cushion',
+                                   'gray_cushion',
+                                   'green_cushion',
+                                   'light_blue_cushion',
+                                   'light_gray_cushion',
+                                   'lime_cushion',
+                                   'magenta_cushion',
+                                   'orange_cushion',
+                                   'pink_cushion',
+                                   'purple_cushion',
+                                   'red_cushion',
+                                   'white_cushion',
+                                   'yellow_cushion'],
+                      'Pots': ['decorated_pot', 'flower_pot'],
+                      'Display_Items': ['armor_stand', 'frame', 'painting', 'glow_frame'],
+                      'Copper_Golem_Statues': ['weathered_copper_golem_statue',
+                                               'waxed_exposed_copper_golem_statue',
+                                               'waxed_copper_golem_statue',
+                                               'oxidized_copper_golem_statue',
+                                               'exposed_copper_golem_statue',
+                                               'waxed_oxidized_copper_golem_statue',
+                                               'waxed_weathered_copper_golem_statue',
+                                               'copper_golem_statue'],
+                      'Music_Discs': ['music_disc_lava_chicken',
+                                      'music_disc_tears',
+                                      'music_disc_13',
+                                      'music_disc_cat',
+                                      'music_disc_blocks',
+                                      'music_disc_chirp',
+                                      'music_disc_far',
+                                      'music_disc_mall',
+                                      'music_disc_mellohi',
+                                      'music_disc_stal',
+                                      'music_disc_strad',
+                                      'music_disc_ward',
+                                      'music_disc_11',
+                                      'music_disc_wait',
+                                      'music_disc_otherside',
+                                      'music_disc_5',
+                                      'music_disc_pigstep',
+                                      'music_disc_relic',
+                                      'music_disc_creator',
+                                      'music_disc_creator_music_box',
+                                      'music_disc_precipice']},
+ 'Materials & Ingredients': {'General_Materials': ['resin_brick',
+                                                   'amethyst_shard',
+                                                   'prismarine_crystals',
+                                                   'raw_copper',
+                                                   'paper',
+                                                   'charcoal',
+                                                   'lapis_lazuli',
+                                                   'raw_gold',
+                                                   'stick',
+                                                   'iron_nugget',
+                                                   'prismarine_shard',
+                                                   'raw_iron',
+                                                   'gold_ingot',
+                                                   'heart_of_the_sea',
+                                                   'clay_ball',
+                                                   'popped_chorus_fruit',
+                                                   'heavy_core',
+                                                   'coal',
+                                                   'bowl',
+                                                   'echo_shard',
+                                                   'copper_ingot',
+                                                   'iron_ingot',
+                                                   'disc_fragment_5',
+                                                   'resin_clump',
+                                                   'flint',
+                                                   'book',
+                                                   'diamond',
+                                                   'copper_nugget',
+                                                   'brick',
+                                                   'gold_nugget',
+                                                   'quartz',
+                                                   'emerald',
+                                                   'netherite_scrap',
+                                                   'netherbrick',
+                                                   'netherite_ingot',
+                                                   'honeycomb'],
+                             'Crafting_Ingredients': ['gunpowder', 'sugar'],
+                             'Pottery_Sherds': ['angler_pottery_sherd',
+                                                'archer_pottery_sherd',
+                                                'arms_up_pottery_sherd',
+                                                'blade_pottery_sherd',
+                                                'brewer_pottery_sherd',
+                                                'burn_pottery_sherd',
+                                                'danger_pottery_sherd',
+                                                'explorer_pottery_sherd',
+                                                'flow_pottery_sherd',
+                                                'friend_pottery_sherd',
+                                                'guster_pottery_sherd',
+                                                'heart_pottery_sherd',
+                                                'heartbreak_pottery_sherd',
+                                                'howl_pottery_sherd',
+                                                'miner_pottery_sherd',
+                                                'mourner_pottery_sherd',
+                                                'plenty_pottery_sherd',
+                                                'prize_pottery_sherd',
+                                                'scrape_pottery_sherd',
+                                                'sheaf_pottery_sherd',
+                                                'shelter_pottery_sherd',
+                                                'skull_pottery_sherd',
+                                                'snort_pottery_sherd'],
+                             'Smithing_Templates': ['bolt_armor_trim_smithing_template',
+                                                    'coast_armor_trim_smithing_template',
+                                                    'dune_armor_trim_smithing_template',
+                                                    'eye_armor_trim_smithing_template',
+                                                    'flow_armor_trim_smithing_template',
+                                                    'host_armor_trim_smithing_template',
+                                                    'raiser_armor_trim_smithing_template',
+                                                    'rib_armor_trim_smithing_template',
+                                                    'sentry_armor_trim_smithing_template',
+                                                    'shaper_armor_trim_smithing_template',
+                                                    'silence_armor_trim_smithing_template',
+                                                    'snout_armor_trim_smithing_template',
+                                                    'spire_armor_trim_smithing_template',
+                                                    'tide_armor_trim_smithing_template',
+                                                    'vex_armor_trim_smithing_template',
+                                                    'ward_armor_trim_smithing_template',
+                                                    'wayfinder_armor_trim_smithing_template',
+                                                    'wild_armor_trim_smithing_template',
+                                                    'netherite_upgrade_smithing_template']},
+ 'Mob Drops': {'Mob_Drops': ['nautilus_shell',
+                             'turtle_scute',
+                             'armadillo_scute',
+                             'phantom_membrane',
+                             'blaze_rod',
+                             'breeze_rod',
+                             'shulker_shell',
+                             'ghast_tear',
+                             'ender_pearl',
+                             'nether_star',
+                             'slime_ball',
+                             'string',
+                             'feather',
+                             'bone',
+                             'glow_ink_sac',
+                             'rotten_flesh',
+                             'ink_sac',
+                             'rabbit_foot',
+                             'rabbit_hide',
+                             'leather',
+                             'spider_eye'],
+               'Heads': ['player_head',
+                         'zombie_head',
+                         'creeper_head',
+                         'dragon_head',
+                         'skeleton_skull',
+                         'wither_skeleton_skull',
+                         'piglin_head']},
+ 'Spawn Eggs': {'Spawn_Eggs': ['chicken_spawn_egg',
+                               'bee_spawn_egg',
+                               'cow_spawn_egg',
+                               'pig_spawn_egg',
+                               'sheep_spawn_egg',
+                               'wolf_spawn_egg',
+                               'polar_bear_spawn_egg',
+                               'ocelot_spawn_egg',
+                               'cat_spawn_egg',
+                               'mooshroom_spawn_egg',
+                               'bat_spawn_egg',
+                               'parrot_spawn_egg',
+                               'rabbit_spawn_egg',
+                               'llama_spawn_egg',
+                               'horse_spawn_egg',
+                               'donkey_spawn_egg',
+                               'mule_spawn_egg',
+                               'skeleton_horse_spawn_egg',
+                               'zombie_horse_spawn_egg',
+                               'tropical_fish_spawn_egg',
+                               'cod_spawn_egg',
+                               'pufferfish_spawn_egg',
+                               'salmon_spawn_egg',
+                               'dolphin_spawn_egg',
+                               'turtle_spawn_egg',
+                               'panda_spawn_egg',
+                               'fox_spawn_egg',
+                               'creeper_spawn_egg',
+                               'enderman_spawn_egg',
+                               'silverfish_spawn_egg',
+                               'skeleton_spawn_egg',
+                               'wither_skeleton_spawn_egg',
+                               'stray_spawn_egg',
+                               'slime_spawn_egg',
+                               'spider_spawn_egg',
+                               'zombie_spawn_egg',
+                               'zombie_pigman_spawn_egg',
+                               'husk_spawn_egg',
+                               'drowned_spawn_egg',
+                               'squid_spawn_egg',
+                               'glow_squid_spawn_egg',
+                               'cave_spider_spawn_egg',
+                               'witch_spawn_egg',
+                               'guardian_spawn_egg',
+                               'elder_guardian_spawn_egg',
+                               'endermite_spawn_egg',
+                               'magma_cube_spawn_egg',
+                               'strider_spawn_egg',
+                               'hoglin_spawn_egg',
+                               'piglin_spawn_egg',
+                               'zoglin_spawn_egg',
+                               'piglin_brute_spawn_egg',
+                               'goat_spawn_egg',
+                               'axolotl_spawn_egg',
+                               'warden_spawn_egg',
+                               'allay_spawn_egg',
+                               'frog_spawn_egg',
+                               'tadpole_spawn_egg',
+                               'trader_llama_spawn_egg',
+                               'camel_spawn_egg',
+                               'ghast_spawn_egg',
+                               'blaze_spawn_egg',
+                               'shulker_spawn_egg',
+                               'vindicator_spawn_egg',
+                               'evoker_spawn_egg',
+                               'vex_spawn_egg',
+                               'villager_spawn_egg',
+                               'wandering_trader_spawn_egg',
+                               'zombie_villager_spawn_egg',
+                               'phantom_spawn_egg',
+                               'pillager_spawn_egg',
+                               'ravager_spawn_egg',
+                               'iron_golem_spawn_egg',
+                               'copper_golem_spawn_egg',
+                               'snow_golem_spawn_egg',
+                               'sniffer_spawn_egg',
+                               'breeze_spawn_egg',
+                               'armadillo_spawn_egg',
+                               'bogged_spawn_egg',
+                               'happy_ghast_spawn_egg',
+                               'creaking_spawn_egg',
+                               'camel_husk_spawn_egg',
+                               'ender_dragon_spawn_egg',
+                               'nautilus_spawn_egg',
+                               'parched_spawn_egg',
+                               'sulfur_cube_spawn_egg',
+                               'wither_spawn_egg',
+                               'zombie_nautilus_spawn_egg']},
+ 'Technical / Legacy': {'Education_Edition': ['hard_glass_pane',
+                                              'hard_stained_glass_pane',
+                                              'hard_glass',
+                                              'border_block',
+                                              'underwater_torch',
+                                              'colored_torch_bp:0',
+                                              'item.camera',
+                                              'glow_stick',
+                                              'element_0',
+                                              'colored_torch_rg:1',
+                                              'camera',
+                                              'chemical_heat',
+                                              'hard_stained_glass',
+                                              'allow',
+                                              'deny',
+                                              'npc_spawn_egg',
+                                              'colored_torch_rg:0',
+                                              'colored_torch_bp:1'],
+                        'Operator_Utilities': ['jigsaw',
+                                               'barrier',
+                                               'structure_void',
+                                               'structure_block',
+                                               'repeating_command_block',
+                                               'command_block',
+                                               'chain_command_block',
+                                               'command_block_minecart'],
+                        'Block_States': ['real_double_stone_slab',
+                                         'lit_smoker',
+                                         'powered_repeater',
+                                         'pumpkin_stem',
+                                         'wall_sign',
+                                         'lit_redstone_ore',
+                                         'carrots',
+                                         'cocoa',
+                                         'potatoes',
+                                         'grass_path',
+                                         'snow_layer',
+                                         'unlit_redstone_torch',
+                                         'powered_comparator',
+                                         'lit_blast_furnace',
+                                         'lit_redstone_lamp',
+                                         'lit_furnace',
+                                         'melon_stem'],
+                        'Internal_Blocks': ['info_update',
+                                            'movingblock',
+                                            'pistonarmcollision',
+                                            'portal',
+                                            'end_gateway',
+                                            'lava',
+                                            'water',
+                                            'end_portal',
+                                            'fire',
+                                            'bubble_column',
+                                            'flowing_lava',
+                                            'soul_fire',
+                                            'flowing_water'],
+                        'Legacy_Blocks': ['reserved6',
+                                          'invisiblebedrock',
+                                          'netherreactor',
+                                          'info_update2',
+                                          'glowingobsidian'],
+                        'Legacy_Item_Aliases': ['stonecutter_block',
+                                                'item.kelp',
+                                                'item.nether_sprouts',
+                                                'item.flower_pot',
+                                                'item.chain',
+                                                'item.skull',
+                                                'item.soul_campfire',
+                                                'item.campfire',
+                                                'melon']}}
+
+# The native slot menu groups standard items by function and type.
+# Internal, state, operator, Education, alias, and legacy identifiers appear
+# under Technical / Legacy.
+
+# Some dark Deepslate icons need menu-only alpha correction on Windows.
+# Their translucent interiors render correctly in the Catalog but can create
+# light streaks in native popup menus. Atlas and Catalog pixels are unchanged.
+MENU_ALPHA_REPAIR_IDS = {
+    'polished_deepslate',
+    'polished_deepslate_slab',
+    'polished_deepslate_stairs',
+    'polished_deepslate_wall',
+    'deepslate_bricks',
+    'cracked_deepslate_bricks',
+    'deepslate_brick_slab',
+    'deepslate_brick_stairs',
+    'deepslate_brick_wall',
+}
+
+# Native slot menus group by item type, then sort alphabetically.
+# Larger mixed-material groups use additional separators.
+MENU_GROUPED_SUBGROUPS = {
+    'Walls', 'Fences', 'Fence_Gates', 'Stairs', 'Slabs', 'Doors', 'Trapdoors',
+    'Logs', 'Boats', 'Chests', 'Beds',
+}
+MENU_WOOD_PREFIXES = (
+    'acacia_', 'bamboo_', 'birch_', 'cherry_', 'crimson_', 'dark_oak_',
+    'jungle_', 'mangrove_', 'oak_', 'pale_oak_', 'poplar_', 'spruce_',
+    'warped_', 'wooden_',
+)
+
 armor_item_range = {
     0: [618, 891, 892, 893, 894, 895, 896, 897, 1079, 1423, 1424, 1425, 1426, 1427, 1428, 1429],
     1: [898, 899, 900, 901, 902, 903, 904, 1080],
@@ -638,6 +2701,48 @@ INPUT_SIZES = {
     'IntArrayTag': 100, 'LongArrayTag': 120
 }
 CLIP_BOARD = {}
+
+
+def _inventory_item_index(items, slot, path):
+    """Resolve fixed equipment positions or a dynamic inventory Slot tag.
+
+    Bedrock's root Armor and Offhand arrays use their list positions for the
+    editor's visual slots. Other inventories identify entries by the Slot tag.
+    """
+    if len(path) == 1 and path[0] in ('Armor', 'Offhand'):
+        return slot if 0 <= slot < len(items) else None
+    return next(
+        (index for index, item in enumerate(items)
+         if item.get('Slot', IntTag(-99)).py_int == slot), None)
+
+
+def _inventory_drop_slot_at(screen_point, source):
+    """Resolve live visible slots by screen position, independent of capture."""
+    def inside(slot):
+        try:
+            return (isinstance(slot, IconButton)
+                    and slot.editor.selected_player is source.editor.selected_player
+                    and slot.editor.slot_map.get(slot.Get_slot_map_key()) is slot
+                    and slot.IsShownOnScreen()
+                    and slot.GetScreenRect().Contains(screen_point))
+        except (RuntimeError, AttributeError):
+            return False
+
+    for slot in source.editor.slot_map.values():
+        if inside(slot):
+            return slot
+    # Allow nested item-container windows to remain accessible.
+    for frame in wx.GetTopLevelWindows():
+        if not isinstance(frame, InventoryEditor) or frame is source.editor:
+            continue
+        try:
+            if frame.IsShownOnScreen():
+                for slot in frame.slot_map.values():
+                    if inside(slot):
+                        return slot
+        except (RuntimeError, AttributeError):
+            continue
+    return None
 DRAG_DATA_SOURCE = collections.defaultdict(dict)
 DRAG_DATA_TARGET = collections.defaultdict(dict)
 def get_item_type(item_id):
@@ -838,72 +2943,257 @@ class IconResources:
     def __init__(self):
         if not hasattr(self, '_initialized'):
             def get_resource_path(filename):
-                # Try likely locations so the plugin still works whether the
-                # atlas sits beside the script, inside a data folder, or in a
-                # PyInstaller bundle.
-                candidates = []
-                filename = Path(filename)
+                """Resolve a bundled/local resource without network access.
 
+                Amulet can load operation modules through import machinery whose
+                runtime ``__file__`` is not always the directory the user thinks
+                of as the plugin folder. Prefer nearby files first, then check
+                Amulet's normal operations directory and an explicitly remembered
+                atlas path. If the atlas is still missing, let the user browse to
+                it rather than silently downloading anything.
+                """
+                requested_name = Path(filename).name
+                candidates = []
+                candidate_seen = set()
+
+                def add_candidate(path):
+                    if path is None:
+                        return
+                    try:
+                        candidate = Path(path).expanduser()
+                    except Exception:
+                        return
+                    key = str(candidate).lower()
+                    if key not in candidate_seen:
+                        candidate_seen.add(key)
+                        candidates.append(candidate)
+
+                source_dir = Path(__file__).resolve().parent
+
+                # Local/source-adjacent locations.
+                for directory in (
+                    source_dir,
+                    source_dir / "data",
+                    source_dir.parent,
+                    source_dir.parent / "data",
+                    source_dir.parent.parent,
+                    source_dir.parent.parent / "data",
+                    Path.cwd(),
+                    Path.cwd() / "data",
+                ):
+                    add_candidate(directory / requested_name)
+
+                # PyInstaller extraction locations, when applicable.
                 if hasattr(sys, "_MEIPASS"):
-                    base_dir = Path(sys._MEIPASS)
-                    candidates.extend([
-                        base_dir / filename,
-                        base_dir / filename.name,
-                        base_dir / "data" / filename.name,
-                    ])
-                else:
-                    current_dir = Path(__file__).resolve().parent
-                    candidates.extend([
-                        current_dir / filename,
-                        current_dir / filename.name,
-                        current_dir / "data" / filename.name,
-                        current_dir.parent / filename.name,
-                        current_dir.parent / "data" / filename.name,
-                        current_dir.parent.parent / filename.name,
-                        current_dir.parent.parent / "data" / filename.name,
-                    ])
+                    bundle_dir = Path(sys._MEIPASS)
+                    add_candidate(bundle_dir / requested_name)
+                    add_candidate(bundle_dir / "data" / requested_name)
+
+                # Amulet's user operation directory is independent of where the
+                # main application executable is installed or later moved.
+                local_app_data = os.environ.get("LOCALAPPDATA")
+                operations_dir = None
+                if local_app_data:
+                    operations_dir = (
+                        Path(local_app_data)
+                        / "AmuletTeam"
+                        / "AmuletMapEditor"
+                        / "plugins"
+                        / "operations"
+                    )
+                    add_candidate(operations_dir / requested_name)
+                    add_candidate(operations_dir / "data" / requested_name)
+
+                # A previously selected explicit path belongs specifically to
+                # the legacy item_atlas.json. Do not reuse it while resolving
+                # item_atlas_128.json or it could masquerade as the optional
+                # high-resolution atlas.
+                if requested_name.lower() == "item_atlas.json":
+                    pointer_files = [source_dir / "Multi_TOOLS_item_atlas_path.txt"]
+                    if operations_dir is not None:
+                        pointer_files.append(
+                            operations_dir / "Multi_TOOLS_item_atlas_path.txt"
+                        )
+
+                    for pointer_path in pointer_files:
+                        try:
+                            if pointer_path.is_file():
+                                remembered = Path(
+                                    pointer_path.read_text(
+                                        encoding="utf-8", errors="replace"
+                                    ).strip()
+                                )
+                                if remembered.is_file():
+                                    add_candidate(remembered)
+                        except Exception:
+                            pass
+
+                # Some Amulet loaders add the original operation directory to
+                # sys.path even when __file__ resolves somewhere else.
+                for raw_path in sys.path:
+                    try:
+                        if not raw_path:
+                            continue
+                        directory = Path(raw_path)
+                        add_candidate(directory / requested_name)
+                        add_candidate(directory / "data" / requested_name)
+                    except Exception:
+                        pass
+
+                self._atlas_search_paths = [str(path) for path in candidates]
 
                 for candidate in candidates:
-                    if candidate.exists():
-                        return str(candidate)
+                    try:
+                        if candidate.is_file():
+                            return str(candidate.resolve())
+                    except Exception:
+                        pass
+
+                # Explicit local browse fallback. This is user-initiated and
+                # performs no network access or filesystem-wide scan.
+                if requested_name.lower() == "item_atlas.json" and wx.GetApp():
+                    default_dir = source_dir
+                    if operations_dir is not None and operations_dir.is_dir():
+                        default_dir = operations_dir
+
+                    dialog = wx.FileDialog(
+                        None,
+                        "Locate item_atlas.json",
+                        defaultDir=str(default_dir),
+                        defaultFile="item_atlas.json",
+                        wildcard="JSON files (*.json)|*.json|All files (*.*)|*.*",
+                        style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST,
+                    )
+                    try:
+                        if dialog.ShowModal() == wx.ID_OK:
+                            chosen = Path(dialog.GetPath())
+                            if chosen.is_file():
+                                # Remember the explicit choice where possible.
+                                target_pointer = (
+                                    operations_dir
+                                    / "Multi_TOOLS_item_atlas_path.txt"
+                                    if operations_dir is not None
+                                    else source_dir
+                                    / "Multi_TOOLS_item_atlas_path.txt"
+                                )
+                                try:
+                                    target_pointer.parent.mkdir(
+                                        parents=True, exist_ok=True
+                                    )
+                                    target_pointer.write_text(
+                                        str(chosen.resolve()),
+                                        encoding="utf-8",
+                                    )
+                                except Exception:
+                                    pass
+                                return str(chosen.resolve())
+                    finally:
+                        dialog.Destroy()
 
                 return None
 
-            def load_remote_json():
-                remote_url = "https://raw.githubusercontent.com/PREMIEREHELL/Amulet-Plugins/main/item_atlas.json"
-                try:
-                    response = urllib.request.urlopen(remote_url, timeout=10)
-                    if response.status == 200:
-                        return json.loads(response.read().decode("utf-8"))
-                except Exception:
-                    pass
-                return None
-
-            # Check to avoid reinitialization
-            self._initialized = True
             self.catalog_window = None
             self.items_id = []  # List to store item ids
-            self.icon_cache = {}  # Cache for item icons
-            self.scaled_cache = {}  # Cache for scaled item icons
-            self.scaled_cache32 = {}
-            self.icon_list_window = None  # Placeholder for the icon list window (not currently used)
+            # legacy_icon_cache always contains the authoritative 32 x 32 atlas
+            # cells. highres_icon_cache contains only optional 128 x 128 cells.
+            # icon_cache is the preferred source for display: high-res when an
+            # ID is present there, otherwise the legacy 32 x 32 image.
+            self.legacy_icon_cache = {}
+            self.highres_icon_cache = {}
+            self.icon_cache = {}
+            self.scaled_cache = {}  # Cache for 64 x 64 logical item icons
+            self.scaled_cache32 = {}  # Native menu bitmaps prefer high-res masters, legacy fallback
+            self.dpi_scaled_cache = {}  # (item id, logical size, scale) -> DPI-aware bitmap
+            self.highres_data = {}
+            self.highres_atlas_path = None
 
-            # Load the icon data from the file, or fall back to the remote copy.
+            # Load the item atlas strictly from local plugin resources.
+            # This fork intentionally performs no automatic network fallback.
             json_path = get_resource_path("data/item_atlas.json")
-            if json_path is not None:
+            if json_path is None:
+                searched = "\n".join(
+                    f"  • {path}" for path in getattr(
+                        self, "_atlas_search_paths", []
+                    )[:20]
+                )
+                message = (
+                    "Multi TOOLS could not find item_atlas.json.\n\n"
+                    "Place a local copy beside Multi_Plugins.py, in a data folder, "
+                    "or select it when prompted.\n"
+                    "This fork does not download plugin data automatically.\n\n"
+                    "Searched locations:\n"
+                    f"{searched or '  • No candidate paths were available.'}"
+                )
+                wx.MessageBox(
+                    message,
+                    "Multi TOOLS - Missing Item Atlas",
+                    wx.OK | wx.ICON_ERROR,
+                )
+                raise FileNotFoundError(message)
+
+            try:
                 with open(json_path, "r", encoding="utf-8") as f:
                     self.data = json.load(f)
-            else:
-                self.data = load_remote_json() or {"atlas": "", "banner": {}}
+            except (OSError, json.JSONDecodeError) as e:
+                message = (
+                    "Multi TOOLS could not load item_atlas.json.\n\n"
+                    f"Path: {json_path}\n"
+                    f"Error: {e}"
+                )
+                wx.MessageBox(
+                    message,
+                    "Multi TOOLS - Invalid Item Atlas",
+                    wx.OK | wx.ICON_ERROR,
+                )
+                raise
+
+            if not isinstance(self.data, dict) or not self.data.get("atlas"):
+                message = (
+                    "item_atlas.json does not contain a usable item atlas.\n\n"
+                    f"Path: {json_path}"
+                )
+                wx.MessageBox(
+                    message,
+                    "Multi TOOLS - Invalid Item Atlas",
+                    wx.OK | wx.ICON_ERROR,
+                )
+                raise ValueError(message)
 
             self.data.setdefault("banner", {})
-            self.data.setdefault("atlas", "")
 
-            # Load the icon cache from the data
-            self.load_icon_cache(self.data)
+            # The high-resolution atlas is optional. It is deliberately loaded
+            # only from normal local/bundled locations: a remembered explicit
+            # item_atlas.json pointer must never be treated as item_atlas_128.json.
+            highres_path = get_resource_path("data/item_atlas_128.json")
+            if highres_path is not None:
+                try:
+                    with open(highres_path, "r", encoding="utf-8") as f:
+                        candidate_highres = json.load(f)
+                    if isinstance(candidate_highres, dict) and candidate_highres.get("atlas"):
+                        self.highres_data = candidate_highres
+                        self.highres_atlas_path = highres_path
+                    else:
+                        print(
+                            "Multi TOOLS: item_atlas_128.json is present but does not "
+                            "contain a usable atlas; using the legacy atlas only."
+                        )
+                except (OSError, json.JSONDecodeError) as e:
+                    print(
+                        "Multi TOOLS: could not load optional item_atlas_128.json; "
+                        f"using the legacy atlas only. Error: {e}"
+                    )
 
-            # Remove the 'atlas' key from the data (unnecessary)
+            # Load the compatibility atlas first, then overlay only matching IDs
+            # from the optional 128 x 128 atlas. Metadata/order remains owned by
+            # item_atlas.json so category/range behavior cannot move silently.
+            self.load_icon_cache(self.data, self.highres_data)
+
+            # Decoded wx.Images are cached separately, so the large base64
+            # payloads are no longer needed in the metadata dictionaries.
             self.data.pop('atlas', None)
+            if isinstance(self.highres_data, dict):
+                self.highres_data.pop('atlas', None)
+            self._initialized = True
 
 
     @property
@@ -918,8 +3208,18 @@ class IconResources:
 
     @property
     def get_icon_cache(self):
-        """Returns the icon cache dictionary."""
+        """Return the preferred source cache (128 px where available)."""
         return self.icon_cache
+
+    @property
+    def get_legacy_icon_cache(self):
+        """Return the authoritative 32 x 32 compatibility source cache."""
+        return self.legacy_icon_cache
+
+    @property
+    def get_highres_icon_cache(self):
+        """Return optional high-resolution source cells keyed by Bedrock ID."""
+        return self.highres_icon_cache
 
     @property
     def get_scaled_cache(self):
@@ -931,15 +3231,78 @@ class IconResources:
         """Returns the icon cache dictionary."""
         return self.scaled_cache32
 
-    def load_icon_cache(self, atlas):
-        """Loads icons from the item atlas."""
+    def _make_native_menu_bitmap(self, item_id, img):
+        """Return a 32 x 32 bitmap safe for the native popup menu.
+
+        Most icons are converted directly. A tiny verified Deepslate family in
+        the historical atlas contains semi-transparent pixels *inside* otherwise
+        opaque geometry. On a white Windows menu those pixels blend toward white
+        and appear as missing/white streaks. For only those IDs, interior
+        semi-transparent pixels are premultiplied against black and made opaque,
+        while border antialiasing and true transparent background pixels are kept.
+        """
+        if item_id not in MENU_ALPHA_REPAIR_IDS or not img.HasAlpha():
+            return img.ConvertToBitmap()
+
+        try:
+            width, height = img.GetWidth(), img.GetHeight()
+            rgb = numpy.frombuffer(bytes(img.GetData()), dtype=numpy.uint8).copy()
+            rgb = rgb.reshape((height, width, 3))
+            alpha = numpy.frombuffer(bytes(img.GetAlpha()), dtype=numpy.uint8).copy()
+            alpha = alpha.reshape((height, width))
+
+            # Mark pixels touching true exterior transparency. Those retain the
+            # original alpha so the outer silhouette stays antialiased.
+            zero = alpha == 0
+            near_zero = numpy.zeros_like(zero)
+            for dy in (-1, 0, 1):
+                for dx in (-1, 0, 1):
+                    y_dst_0 = max(0, dy)
+                    y_dst_1 = min(height, height + dy)
+                    x_dst_0 = max(0, dx)
+                    x_dst_1 = min(width, width + dx)
+                    y_src_0 = max(0, -dy)
+                    y_src_1 = min(height, height - dy)
+                    x_src_0 = max(0, -dx)
+                    x_src_1 = min(width, width - dx)
+                    near_zero[y_dst_0:y_dst_1, x_dst_0:x_dst_1] |= (
+                        zero[y_src_0:y_src_1, x_src_0:x_src_1]
+                    )
+
+            repair = (alpha > 0) & (alpha < 250) & (~near_zero)
+            if numpy.any(repair):
+                premultiplied = numpy.rint(
+                    rgb.astype(numpy.float32) * (alpha.astype(numpy.float32)[:, :, None] / 255.0)
+                ).clip(0, 255).astype(numpy.uint8)
+                rgb[repair] = premultiplied[repair]
+                alpha[repair] = 255
+
+                repaired = wx.Image(width, height)
+                repaired.SetData(rgb.tobytes())
+                repaired.SetAlpha(alpha.tobytes())
+                if repaired.IsOk():
+                    return repaired.ConvertToBitmap()
+        except Exception as e:
+            print(f"Menu alpha repair failed for {item_id}: {e}")
+
+        return img.ConvertToBitmap()
+
+    def load_icon_cache(self, atlas, highres_atlas=None):
+        """Load the legacy atlas and optionally overlay validated 128 px cells.
+
+        The legacy atlas owns item metadata, ordering, menu pixels, and fallback.
+        The optional high-resolution atlas is display-only and can never make an
+        otherwise missing legacy item appear in category/range logic.
+        """
 
         def load_base64_imagefile(data):
-            """Decodes and loads the base64-encoded image from the atlas data."""
+            """Decode a raw-base64 or data-URI PNG atlas into wx.Image."""
             atlas_blob = data.get('atlas') if isinstance(data, dict) else None
             if not atlas_blob:
                 return None
             try:
+                if isinstance(atlas_blob, str) and atlas_blob.startswith("data:"):
+                    atlas_blob = atlas_blob.split(",", 1)[1]
                 atlas_data = base64.b64decode(atlas_blob)
                 buffer = io.BytesIO(atlas_data)
                 atlas_image = wx.Image()
@@ -948,151 +3311,419 @@ class IconResources:
             except Exception:
                 return None
 
-        # Load the atlas image (either from base64 or direct file path)
-        atlas_image = None
+        def scale_source(img, width, height):
+            """Use filtered reduction for 128 px masters, nearest for enlargement."""
+            if img is None or not img.IsOk():
+                return None
+            shrinking = img.GetWidth() > width or img.GetHeight() > height
+            if shrinking:
+                quality = getattr(
+                    wx, "IMAGE_QUALITY_HIGH",
+                    getattr(wx, "IMAGE_QUALITY_BILINEAR", getattr(wx, "IMAGE_QUALITY_NORMAL", 0)),
+                )
+            else:
+                quality = getattr(
+                    wx, "IMAGE_QUALITY_NEAREST", getattr(wx, "IMAGE_QUALITY_NORMAL", 0)
+                )
+            try:
+                return img.Scale(width, height, quality)
+            except Exception:
+                return None
+
+        legacy_image = None
         if isinstance(atlas, dict):
-            atlas_image = load_base64_imagefile(atlas)
+            legacy_image = load_base64_imagefile(atlas)
         elif atlas:
             try:
-                atlas_image = wx.Image(atlas, wx.BITMAP_TYPE_PNG)
+                legacy_image = wx.Image(atlas, wx.BITMAP_TYPE_PNG)
             except Exception:
-                atlas_image = None
+                legacy_image = None
 
-        if atlas_image is None or not atlas_image.IsOk():
+        if legacy_image is None or not legacy_image.IsOk():
             return
 
-        # Extract icons from the atlas and add to the cache
+        # Preserve the legacy atlas as the compatibility/menu authority.
         for item_id, data in self.data.items():
             if isinstance(data, dict) and "icon_position" in data:
-                x, y = data["icon_position"]["x"], data["icon_position"]["y"]
-                icon_image = atlas_image.GetSubImage(wx.Rect(x, y, 32, 32))
-                self.icon_cache[item_id] = icon_image
-                self.items_id.append(item_id)
+                try:
+                    x = int(data["icon_position"]["x"])
+                    y = int(data["icon_position"]["y"])
+                    if x < 0 or y < 0 or x + 32 > legacy_image.GetWidth() or y + 32 > legacy_image.GetHeight():
+                        continue
+                    icon_image = legacy_image.GetSubImage(wx.Rect(x, y, 32, 32))
+                    if icon_image is not None and icon_image.IsOk():
+                        self.legacy_icon_cache[item_id] = icon_image
+                        self.icon_cache[item_id] = icon_image
+                        self.items_id.append(item_id)
+                except Exception:
+                    continue
+
+        # Overlay only IDs already known to the compatibility atlas. A malformed
+        # optional file never prevents Multi Tools from starting normally.
+        highres_image = load_base64_imagefile(highres_atlas) if isinstance(highres_atlas, dict) else None
+        if highres_image is not None and highres_image.IsOk():
+            meta = highres_atlas.get("_meta", {}) if isinstance(highres_atlas, dict) else {}
+            default_cell = 128
+            try:
+                default_cell = int(meta.get("cell_size", 128))
+            except Exception:
+                default_cell = 128
+
+            if 32 <= default_cell <= 512:
+                for item_id, data in highres_atlas.items():
+                    if item_id.startswith("_") or item_id == "atlas":
+                        continue
+                    if item_id not in self.legacy_icon_cache:
+                        continue
+                    if not isinstance(data, dict) or "icon_position" not in data:
+                        continue
+                    try:
+                        cell_size = int(data.get("cell_size", default_cell))
+                        x = int(data["icon_position"]["x"])
+                        y = int(data["icon_position"]["y"])
+                        if not (32 <= cell_size <= 512):
+                            continue
+                        if x < 0 or y < 0 or x + cell_size > highres_image.GetWidth() or y + cell_size > highres_image.GetHeight():
+                            continue
+                        highres_icon = highres_image.GetSubImage(
+                            wx.Rect(x, y, cell_size, cell_size)
+                        )
+                        if highres_icon is not None and highres_icon.IsOk():
+                            self.highres_icon_cache[item_id] = highres_icon
+                            self.icon_cache[item_id] = highres_icon
+                    except Exception:
+                        continue
+
+        if self.highres_icon_cache:
+            print(
+                f"Multi TOOLS: loaded {len(self.highres_icon_cache)} optional "
+                "high-resolution atlas cells; all other IDs use the legacy atlas."
+            )
 
         target_width = 64
         target_height = 64
 
-        for item_id, img in self.icon_cache.items():
-            scaled_img = img.Scale(target_width, target_height, wx.IMAGE_QUALITY_HIGH)
-            bmp = scaled_img.ConvertToBitmap()
-            self.scaled_cache[item_id] = bmp
+        for item_id in self.items_id:
+            legacy = self.legacy_icon_cache.get(item_id)
+
+            # Native popup menus still display a compact 32 x 32 bitmap, but
+            # they should use the same high-resolution master as the Inventory
+            # Editor and Catalog whenever one exists. This preserves native menu
+            # sizing while avoiding a softer legacy-atlas source for 128-backed IDs.
+            menu_source = self.highres_icon_cache.get(item_id)
+            if menu_source is None or not menu_source.IsOk():
+                menu_source = legacy
+            menu_image = scale_source(menu_source, 32, 32)
+            if menu_image is not None and menu_image.IsOk():
+                self.scaled_cache32[item_id] = self._make_native_menu_bitmap(
+                    item_id, menu_image
+                )
+
+            preferred = self.icon_cache.get(item_id)
+            scaled_img = scale_source(preferred, target_width, target_height)
+            if (scaled_img is None or not scaled_img.IsOk()) and preferred is not legacy:
+                scaled_img = scale_source(legacy, target_width, target_height)
+            if scaled_img is not None and scaled_img.IsOk():
+                self.scaled_cache[item_id] = scaled_img.ConvertToBitmap()
 
     def get_bitmap(self, bedrock_id):
         return self.scaled_cache.get(bedrock_id)
+
+    def get_dpi_bitmap(self, bedrock_id, window=None, logical_size=64):
+        """Return an atlas bitmap sized for the target platform.
+
+        Windows uses actual pixel dimensions for native control bitmaps; the
+        default 64 px cache is preserved unless a calibrated slot requests
+        another size. Other platforms may use a DPI-tagged physical bitmap.
+        """
+        img = self.icon_cache.get(bedrock_id)
+        if img is None or not img.IsOk():
+            return self.scaled_cache.get(bedrock_id, wx.NullBitmap)
+
+        scale = _ui_dpi_scale(window) if window is not None else 1.0
+
+        # wxMSW does not use bitmap scale factors for logical drawing size.
+        # Keep the existing 64 px route unchanged. Explicit alternate pixel
+        # sizes are for calibrated inventory slots only, with the original
+        # bitmap as a safe fallback if image conversion fails.
+        if getattr(wx, "Platform", "") == "__WXMSW__":
+            fallback = self.scaled_cache.get(bedrock_id, wx.NullBitmap)
+            try:
+                pixel_size = int(logical_size)
+                if pixel_size != 64 and 32 <= pixel_size <= 128:
+                    cache_key = (bedrock_id, pixel_size, "msw")
+                    cached = self.dpi_scaled_cache.get(cache_key)
+                    if cached is not None and cached.IsOk():
+                        return cached
+                    quality = (
+                        getattr(wx, "IMAGE_QUALITY_HIGH", wx.IMAGE_QUALITY_NORMAL)
+                        if img.GetWidth() > pixel_size or img.GetHeight() > pixel_size
+                        else getattr(wx, "IMAGE_QUALITY_NEAREST", wx.IMAGE_QUALITY_NORMAL)
+                    )
+                    scaled = img.Scale(pixel_size, pixel_size, quality)
+                    if scaled is not None and scaled.IsOk():
+                        bitmap = scaled.ConvertToBitmap()
+                        if bitmap is not None and bitmap.IsOk():
+                            self.dpi_scaled_cache[cache_key] = bitmap
+                            return bitmap
+                return fallback if fallback and fallback.IsOk() else wx.NullBitmap
+            except Exception:
+                return fallback if fallback and fallback.IsOk() else wx.NullBitmap
+
+        # Quantise only for cache stability, not for the actual visual size.
+        scale_key = round(scale, 3)
+        cache_key = (bedrock_id, int(logical_size), scale_key)
+        cached = self.dpi_scaled_cache.get(cache_key)
+        if cached is not None and cached.IsOk():
+            return cached
+
+        nearest_quality = getattr(
+            wx, "IMAGE_QUALITY_NEAREST", getattr(wx, "IMAGE_QUALITY_NORMAL", 0)
+        )
+        reduction_quality = getattr(
+            wx, "IMAGE_QUALITY_HIGH",
+            getattr(wx, "IMAGE_QUALITY_BILINEAR", getattr(wx, "IMAGE_QUALITY_NORMAL", 0)),
+        )
+
+        # Non-Windows ports with DPI-independent pixels can use a larger physical
+        # bitmap plus a scale tag. Validate bitmap state around every
+        # native bitmap operation.
+        can_tag_scale = scale > 1.0 and hasattr(wx.Bitmap, "SetScaleFactor")
+        physical_size = int(logical_size)
+        if can_tag_scale:
+            physical_size = max(int(logical_size), int(round(logical_size * scale)))
+
+        try:
+            quality = (
+                reduction_quality
+                if img.GetWidth() > physical_size or img.GetHeight() > physical_size
+                else nearest_quality
+            )
+            scaled = img.Scale(physical_size, physical_size, quality)
+        except Exception:
+            return self.scaled_cache.get(bedrock_id, wx.NullBitmap)
+        if scaled is None or not scaled.IsOk():
+            return self.scaled_cache.get(bedrock_id, wx.NullBitmap)
+
+        try:
+            bitmap = scaled.ConvertToBitmap()
+        except Exception:
+            return self.scaled_cache.get(bedrock_id, wx.NullBitmap)
+        if not bitmap or not bitmap.IsOk():
+            return self.scaled_cache.get(bedrock_id, wx.NullBitmap)
+
+        if can_tag_scale:
+            try:
+                bitmap.SetScaleFactor(scale)
+            except Exception:
+                return self.scaled_cache.get(bedrock_id, wx.NullBitmap)
+            if not bitmap.IsOk():
+                return self.scaled_cache.get(bedrock_id, wx.NullBitmap)
+
+        self.dpi_scaled_cache[cache_key] = bitmap
+        return bitmap
 
     def get(self, item_id, default=None):
         """Returns the data for a given item ID, or a default value if not found."""
         return self.data.get(item_id, default)
 
+    def _get_catalog_window(self):
+        """Return the live Catalog window, clearing stale wx wrappers."""
+        window = WINDOW.get('catalog')
+        if window is None:
+            return None
+        try:
+            # Accessing a deleted wx wrapper raises RuntimeError/PyDeadObjectError.
+            window.GetId()
+            window.GetHandle()
+            return window
+        except Exception:
+            WINDOW['catalog'] = None
+            self.catalog_window = None
+            return None
+
+    def _catalog_parent(self, parent, data):
+        """Prefer the InventoryEditor itself as the Catalog owner."""
+        try:
+            if isinstance(data, wx.Window):
+                return data
+        except Exception:
+            pass
+        return parent
+
+    def _create_catalog_window(self, parent, data, slot):
+        catalog_parent = self._catalog_parent(parent, data)
+        window = IconListCtrl(catalog_parent, "Catalog", data, slot)
+        WINDOW['catalog'] = window
+        self.catalog_window = window
+        return window
+
     def open_catalog(self, parent, data, slot):
-        """Open the catalog window, ensuring only one instance exists."""
-        if WINDOW.get('catalog', None) is None:  # If window is not created yet
-            WINDOW['catalog'] = IconListCtrl(parent, "Catalog", data, slot)
+        """Open a live Catalog window, recreating it if its wx object died."""
+        catalog_parent = self._catalog_parent(parent, data)
+        window = self._get_catalog_window()
+
+        # A global Catalog owned by a different InventoryEditor can be destroyed
+        # when that editor closes. Recreate it under the active editor instead of
+        # retaining a fragile cross-parent child window.
+        if window is not None:
+            try:
+                if window.GetParent() is not catalog_parent:
+                    window.Destroy()
+                    WINDOW['catalog'] = None
+                    self.catalog_window = None
+                    window = None
+            except Exception:
+                WINDOW['catalog'] = None
+                self.catalog_window = None
+                window = None
+
+        if window is None:
+            window = self._create_catalog_window(parent, data, slot)
         else:
-            self.catalog_window.update_data(data)
-            self.catalog_window.update_slot(slot)
-            # Calculate position to place the catalog window next to the parent window
+            window.update_data(data)
+            if slot is not None:
+                window.update_slot(slot)
+
         mouse_x, mouse_y = wx.GetMousePosition()
+        offset_x = 10
+        offset_y = 10
+        window.Move(mouse_x + offset_x, mouse_y + offset_y)
+        self._clamp_catalog_to_display()
+        window.Show()
+        window.Raise()
+        return window
 
-        # Optionally, add some offset to the mouse position so that the window doesn't overlap the mouse
-        offset_x = 10  # Horizontal offset from the mouse position
-        offset_y = 10  # Vertical offset from the mouse position
+    def _clamp_catalog_to_display(self):
+        """Keep the live Catalog inside the usable desktop area."""
+        try:
+            window = self._get_catalog_window()
+            if window is None:
+                return
+            rect = wx.GetClientDisplayRect()
+            size = window.GetSize()
+            pos = window.GetPosition()
+            max_x = rect.x + max(0, rect.width - size.width)
+            max_y = rect.y + max(0, rect.height - size.height)
+            x = min(max(pos.x, rect.x), max_x)
+            y = min(max(pos.y, rect.y), max_y)
+            window.Move(x, y)
+        except Exception:
+            pass
 
-        # Set the position of the catalog window to be near the mouse position
-        WINDOW['catalog'].Move(mouse_x + offset_x, mouse_y + offset_y)
 
-        # Ensure the window stays within the screen bounds (on the same monitor)
-        screen_width, screen_height = wx.GetDisplaySize()  # Get screen size (monitor resolution)
-
-        # Check if the catalog window would go off the screen on the right or bottom
-        catalog_x, catalog_y = WINDOW['catalog'].GetPosition()
-        catalog_width, catalog_height = WINDOW['catalog'].GetSize()
-        if catalog_x + catalog_width > screen_width:
-            # If it's too far to the right, position it to the left of the mouse
-            WINDOW['catalog'].Move(mouse_x - catalog_width - offset_x, mouse_y + offset_y)
-        if catalog_y + catalog_height > screen_height:
-            # If it's too far down, position it above the mouse
-            WINDOW['catalog'].Move(mouse_x + offset_x, mouse_y - catalog_height - offset_y)
-        WINDOW['catalog'].Show()  # Show the window
-        WINDOW['catalog'].Raise()  # Bring it to the front
-
-    def close_catalog(self):
-        """Close (hide) the catalog window."""
-        if WINDOW.get('catalog', None):
-            WINDOW['catalog'].Hide()  # Hide the window, but don't destroy it
-
-    def toggle_catalog_h(self, parent, data, slot):
-        if WINDOW.get('catalog', None) is None:
-            WINDOW['catalog'](parent, data, slot)
-
-            WINDOW['catalog'].Hide()
 
     def toggle_catalog(self, parent, data, slot):
-        """Toggle between showing and hiding the catalog window."""
-        def poss():
-            # Calculate position to place the catalog window next to the parent window
-            mouse_x, mouse_y = wx.GetMousePosition()
+        """Toggle the Catalog while tolerating destroyed native wx windows."""
+        window = self._get_catalog_window()
+        if window is None:
+            window = self.open_catalog(parent, data, slot)
+            # Keep the historical near-mouse placement used by slot menu opens.
+            try:
+                mouse_x, mouse_y = wx.GetMousePosition()
+                window.Move(mouse_x - 800, mouse_y - 50)
+                self._clamp_catalog_to_display()
+            except Exception:
+                pass
+            return
 
-            # Optionally, add some offset to the mouse position so that the window doesn't overlap the mouse
-            offset_x = -800  # Horizontal offset from the mouse position
-            offset_y = -50  # Vertical offset from the mouse position
-
-            # Set the position of the catalog window to be near the mouse position
-            WINDOW['catalog'].Move(mouse_x + offset_x, mouse_y + offset_y)
-
-            # Ensure the window stays within the screen bounds (on the same monitor)
-            screen_width, screen_height = wx.GetDisplaySize()  # Get screen size (monitor resolution)
-
-            # Check if the catalog window would go off the screen on the right or bottom
-            catalog_x, catalog_y = WINDOW['catalog'].GetPosition()
-            catalog_width, catalog_height = WINDOW['catalog'].GetSize()
-            if catalog_x + catalog_width > screen_width:
-                # If it's too far to the right, position it to the left of the mouse
-                WINDOW['catalog'].Move(mouse_x - catalog_width - offset_x, mouse_y + offset_y)
-            if catalog_y + catalog_height > screen_height:
-                # If it's too far down, position it above the mouse
-                WINDOW['catalog'].Move(mouse_x + offset_x, mouse_y - catalog_height - offset_y)
-        if WINDOW.get('catalog', None) is None:
+        try:
+            if window.IsShown():
+                window.Hide()
+                return
+        except Exception:
+            WINDOW['catalog'] = None
+            self.catalog_window = None
             self.open_catalog(parent, data, slot)
-            poss()
-            WINDOW['catalog'].Show()
-        else:
-            # self.catalog_window.update_data(data)
-            # self.catalog_window.update_slot(slot)
+            return
 
-            if WINDOW['catalog'].IsShown():
-                WINDOW['catalog'].Hide()
+        # Reuse only when it is still owned by the active InventoryEditor.
+        catalog_parent = self._catalog_parent(parent, data)
+        try:
+            if window.GetParent() is not catalog_parent:
+                window.Destroy()
+                WINDOW['catalog'] = None
+                self.catalog_window = None
+                window = self._create_catalog_window(parent, data, slot)
             else:
-                # Calculate position to place the catalog window next to the parent window
-                if WINDOW['catalog'] is None:  # If window is not created yet
-                    WINDOW['catalog'] = IconListCtrl(parent, "Catalog", data, slot)
+                window.update_data(data)
+                if slot is not None:
+                    window.update_slot(slot)
+        except Exception:
+            WINDOW['catalog'] = None
+            self.catalog_window = None
+            window = self._create_catalog_window(parent, data, slot)
 
-                poss()
-                WINDOW['catalog'].Show()
+        mouse_x, mouse_y = wx.GetMousePosition()
+        window.Move(mouse_x - 800, mouse_y - 50)
+        self._clamp_catalog_to_display()
+        window.Show()
+        window.Raise()
 
 class InventoryEditor(wx.Frame):
+    def _active_panel_drag_source(self):
+        source = getattr(self, '_inventory_drag_source', None)
+        if (source is not None
+                and getattr(source, 'drag_image', None) is not None
+                and getattr(source, '_drag_capture_window', None) is self.scroll_panel):
+            return source
+        return None
+
+    def _on_inventory_panel_motion(self, event):
+        source = self._active_panel_drag_source()
+        if source is not None:
+            source._on_drag_parent_motion(event)
+        else:
+            event.Skip()
+
+    def _on_inventory_panel_left_up(self, event):
+        source = self._active_panel_drag_source()
+        if source is not None:
+            source._on_drag_parent_left_up(event)
+        else:
+            event.Skip()
+
+    def _on_inventory_panel_capture_lost(self, event):
+        source = self._active_panel_drag_source()
+        if source is not None:
+            source._on_drag_parent_capture_lost(event)
+        # Never Skip a capture-lost notification: wx requires it to be handled.
+
     def __init__(self, parent, selected_player, keys, title="Inventory Editor"):
-        super().__init__(parent, title=title, size=(810, 740), style=wx.DEFAULT_FRAME_STYLE | wx.STAY_ON_TOP)
+        super().__init__(parent, title=title, size=(820, 640), style=_float_on_parent_style())
 
         self.armor_types = ['helmet', 'chestplate', 'leggings', 'boots']
         self.resources = IconResources()
         BANNER['ICONS'] = self.resources.get_json_data['banner']
         self.parent = parent
         self.selected_player = selected_player
-        # self.resources.icon_cache = self.resources.icon_cache
-        # self.data = self.resources.get_json_data
         self.keys = keys
         self.inventory = selected_player[keys]
         self.slot_map = collections.defaultdict(list)
         self.items_id = []
         self.armor_tags = {}
         self.current_slot = 0
+        self._main_inventory_ui = title == "Inventory Editor"
+        self._inventory_family_ui = True
+        # Kept as a compatibility alias for older code paths.
+        self._compact_inventory_ui = self._main_inventory_ui
+        self._dpi_scale = _ui_dpi_scale(self)
+
         main_vbox = wx.BoxSizer(wx.VERTICAL)
-        self.scroll_panel = wx.ScrolledWindow(self, style=wx.VSCROLL)
-        self.font = wx.Font(18, wx.FONTFAMILY_ROMAN, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD)
+        self.scroll_panel = wx.ScrolledWindow(self, style=wx.VSCROLL | wx.HSCROLL | wx.CLIP_CHILDREN)
+        self.scroll_panel.SetBackgroundColour(wx.Colour(0, 0, 0))
+        # Bind the capture-owner handlers once. Mutating wxWidgets' dynamic
+        # event table inside an active release callback can cause MSW asserts.
+        self._inventory_drag_source = None
+        self.scroll_panel.Bind(wx.EVT_MOTION, self._on_inventory_panel_motion)
+        self.scroll_panel.Bind(wx.EVT_LEFT_UP, self._on_inventory_panel_left_up)
+        self.scroll_panel.Bind(wx.EVT_MOUSE_CAPTURE_LOST, self._on_inventory_panel_capture_lost)
+
+        editor_font_size = _ui_metric(self, 12, 14)
+        self.font = wx.Font(editor_font_size, wx.FONTFAMILY_ROMAN, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD)
         self.SetFont(self.font)
         self.SetForegroundColour((0, 255, 0))
-        self.SetBackgroundColour(wx.Colour(0, 0, 0, 0))
+        self.SetBackgroundColour(wx.Colour(0, 0, 0))
         self.dragged_index = None
         self.dragged_id = None
         self.drag_image = None
@@ -1100,19 +3731,16 @@ class InventoryEditor(wx.Frame):
         menubar = wx.MenuBar()
         file_menu = wx.Menu()
 
-        # 1. Predefined ID: wx.ID_OPEN
         file_menu.Append(wx.ID_OPEN, "Import Inventory\tCtrl+O", "Open a file")
         self.Bind(wx.EVT_MENU, self.on_open, id=wx.ID_OPEN)
 
         file_menu.Append(wx.ID_SAVE, "Export Inventory\tCtrl+S", "Save")
         self.Bind(wx.EVT_MENU, self.on_save, id=wx.ID_SAVE)
 
-        # 2. Custom ID using NewIdRef
         self.items_id = wx.NewIdRef()
         file_menu.Append(self.items_id, "Items Menu\tCtrl+I", "Show items")
         self.Bind(wx.EVT_MENU, self.on_items_menu, id=self.items_id)
 
-        # 3. Custom ID using NewIdRef (Clear All)
         self.clear_id = wx.NewIdRef()
         file_menu.Append(self.clear_id, "Clear All\tCtrl+Shift+C", "Clear everything")
         self.Bind(wx.EVT_MENU, self.on_clear_all, id=self.clear_id)
@@ -1120,26 +3748,85 @@ class InventoryEditor(wx.Frame):
         menubar.Append(file_menu, "&Menu")
         self.SetMenuBar(menubar)
 
-        # Accelerator table
         accel_tbl = wx.AcceleratorTable([
-            (wx.ACCEL_CTRL, ord('O'), wx.ID_OPEN),  # Open
-            (wx.ACCEL_CTRL, ord('I'), self.items_id),  # Items Menu
-            (wx.ACCEL_CTRL | wx.ACCEL_SHIFT, ord('C'), self.clear_id),  # Clear All
+            (wx.ACCEL_CTRL, ord('O'), wx.ID_OPEN),
+            (wx.ACCEL_CTRL, ord('I'), self.items_id),
+            (wx.ACCEL_CTRL | wx.ACCEL_SHIFT, ord('C'), self.clear_id),
         ])
         self.SetAcceleratorTable(accel_tbl)
-        # Layout sections
-        self.grid_sizer = wx.GridSizer(4, 9, 5, 5)  # Max columns set to 9
 
-        self.populate_grid()  # Fill the grid with items
-   #     self.map_drop_buttons()
+        initial_gap = _ui_metric(self, 5, 8)
+        self.grid_sizer = wx.GridSizer(4, 9, initial_gap, initial_gap)
+        self.populate_grid()
         self.scroll_panel.SetSizer(self.grid_sizer)
-        main_vbox.Add(self.scroll_panel, 1, wx.EXPAND | wx.ALL, 5)
-        # self.Bind(wx.EVT_CLOSE, self.on_close)
+        outer_pad = _ui_metric(self, 4, 8)
+        main_vbox.Add(self.scroll_panel, 1, wx.EXPAND | wx.ALL, outer_pad)
         self.SetSizer(main_vbox)
+        self._fit_inventory_window()
         self.Centre()
-        # self.Move(self.GetPosition())
+        _clamp_window_to_display(self)
         self.Show()
+        self.Raise()
 
+        if hasattr(wx, 'EVT_DISPLAY_CHANGED'):
+            self.Bind(wx.EVT_DISPLAY_CHANGED, self._on_display_metrics_changed)
+        if hasattr(wx, 'EVT_DPI_CHANGED'):
+            self.Bind(wx.EVT_DPI_CHANGED, self._on_display_metrics_changed)
+
+    def _fit_inventory_window(self):
+        """Fit to current content and continuously interpolate explicit UI metrics."""
+        try:
+            self.Layout()
+            self.scroll_panel.Layout()
+            self.scroll_panel.FitInside()
+            self.scroll_panel.SetScrollRate(_ui_metric(self, 8, 12), _ui_metric(self, 8, 12))
+
+            grid_size = self.grid_sizer.GetMinSize()
+            display = wx.GetClientDisplayRect()
+            if self._main_inventory_ui:
+                pad_w = _ui_metric(self, 40, 96)
+                pad_h = _ui_metric(self, 44, 110)
+                min_w = _ui_metric(self, 620, 1040)
+                min_h = _ui_metric(self, 500, 760)
+                max_w = int(display.width * 0.94)
+                max_h = int(display.height * 0.90)
+            else:
+                pad_w = _ui_metric(self, 28, 70)
+                pad_h = _ui_metric(self, 34, 96)
+                min_w = _ui_metric(self, 500, 900)
+                min_h = _ui_metric(self, 390, 660)
+                max_w = int(display.width * 0.88)
+                max_h = int(display.height * 0.84)
+
+            # Keep the accepted 1080p / 100% and 4K / 225% layout unchanged.
+            # At 1440p / 150%, prefer a tighter frame while still fitting the
+            # actual grid. Never force the client area below its content width.
+            if _ui_is_1440p_150(self):
+                if self._main_inventory_ui:
+                    pad_w, pad_h = 52, 58
+                    min_w, min_h = 700, 540
+                elif "Ender" in self.GetTitle():
+                    pad_w, pad_h = 38, 49
+                    min_w, min_h = 590, 440
+
+            preferred_w = max(min_w, int(grid_size.width) + pad_w)
+            preferred_h = max(min_h, int(grid_size.height) + pad_h)
+            target_w = min(max_w, preferred_w)
+            target_h = min(max_h, preferred_h)
+            self.SetClientSize(wx.Size(target_w, target_h))
+            self.SetMinSize(wx.Size(min(target_w, min_w), min(target_h, min_h)))
+            _clamp_window_to_display(self, 0.96, 0.92)
+        except Exception:
+            pass
+
+    def _on_display_metrics_changed(self, event):
+        # A full control rebuild is unnecessary for normal use because these
+        # editors are reopened after changing Windows scaling. Refit immediately
+        # so resolution/display changes cannot leave a window off-screen.
+        self._dpi_scale = _ui_dpi_scale(self)
+        wx.CallAfter(self._fit_inventory_window)
+        if event is not None:
+            event.Skip()
 
     def on_open(self, event):
         with wx.FileDialog(self, "Open NBT file", wildcard="NBT files (*.nbt)|*.nbt",
@@ -1170,10 +3857,9 @@ class InventoryEditor(wx.Frame):
                                   string_encoder=utf8_escape_encoder)
 
             print(f"Saving file to: {pathname}")
-            # TODO: Save your NBT file here
     def on_items_menu(self, event):
         self.icon_resources = IconResources()
-        self.icon_resources.toggle_catalog(self.parent, self, None)
+        self.icon_resources.toggle_catalog(self, self, None)
 
     def on_clear_all(self, event):
         for x in self.slot_map.values():
@@ -1187,8 +3873,6 @@ class InventoryEditor(wx.Frame):
             self.selected_player[current]['Damage'] = ShortTag(0)
         self.Refresh()
 
-    def get_selected_slot(self):
-        return self.current_slot
 
     def set_selected_slot(self, selected):
         self.current_slot = selected
@@ -1252,7 +3936,8 @@ class InventoryEditor(wx.Frame):
         self.selected_player.save_player()
 
     def ender_chest(self, event):
-        InventoryEditor(self, self.selected_player, [], title='Ender Chest')
+        self._ender_chest_editor = InventoryEditor(self, self.selected_player, [], title='Ender Chest')
+        self._ender_chest_editor.Raise()
 
     def populate_grid(self):
         self.grid_sizer.Clear(delete_windows=False)
@@ -1283,7 +3968,7 @@ class InventoryEditor(wx.Frame):
                 item_list = item.get('tag', {}).get('Items')
             except  (KeyError, IndexError, TypeError):
                 item_list = False
-                print('key error on empty list')
+                print("Container item list could not be read; item details may be incomplete.")
                 pass
             if item_list:
                 if len(item_list) > 0:
@@ -1316,17 +4001,47 @@ class InventoryEditor(wx.Frame):
                             self.armor_tags[k] = v
             return item_name
 
-        def middle_slots(count, main=True, not_extra=True):
+        def middle_slots(count, main=True, not_extra=True, target_sizer=None):
+            target_sizer = target_sizer or self.grid_sizer
             for i in range(count):
                 if i == 1 and not_extra:
-                    save_bmp = wx.ArtProvider.GetBitmap(wx.ART_FILE_SAVE, wx.ART_TOOLBAR, (80, 80))
+                    if self._inventory_family_ui:
+                        if self._main_inventory_ui:
+                            save_edge = _ui_metric_three(self, 64, 76, 78)
+                        else:
+                            save_edge = _ui_metric_three(self, 64, 76, 78)
+                        save_size = (save_edge, save_edge)
+                    else:
+                        save_size = (80, 80)
+                    save_bmp = wx.ArtProvider.GetBitmap(wx.ART_FILE_SAVE, wx.ART_TOOLBAR, save_size)
+                    # Some Windows/wx builds return the stock toolbar art at a
+                    # smaller native bitmap than the requested size. Scale the
+                    # returned artwork explicitly so its visual size tracks the
+                    # continuously interpolated slot size instead of looking
+                    # undersized at 100% and 150%.
+                    try:
+                        if save_bmp and save_bmp.IsOk():
+                            # Normalize native ArtProvider scale metadata by always
+                            # round-tripping through wx.Image. This makes the tuned
+                            # pixel target deterministic across 100%, 150%, and 225%
+                            # instead of allowing a platform bitmap scale factor to
+                            # magnify the same requested art differently.
+                            img = save_bmp.ConvertToImage()
+                            if img.IsOk():
+                                if (img.GetWidth(), img.GetHeight()) != save_size:
+                                    img = img.Scale(save_size[0], save_size[1], wx.IMAGE_QUALITY_HIGH)
+                                save_bmp = wx.Bitmap(img)
+                    except Exception:
+                        pass
                     button = IconButton(self.scroll_panel, None, "Save", 2000, save_bmp, -200, self)
                     button.HideButtonValue()
                     button.UnbindButtonMenu()
                     button.Bind(wx.EVT_BUTTON, self.save_button)
                     button.SetName('Save')
                     button.SetForegroundColour((0, 255, 0))
-                    self.grid_sizer.Add(button, 0, wx.TOP, 5)
+                    if self._inventory_family_ui:
+                        button.SetBackgroundColour(wx.Colour(46, 46, 46))
+                    target_sizer.Add(button, 0, wx.TOP, _ui_metric(self, 4, 6))
                 elif i == 2 and main:
                     icon = self.resources.get_scaled_cache['ender_chest']
                     button = IconButton(self.scroll_panel, 'ender_chest', "Player EnderChest", 2000, icon, -201, self)
@@ -1335,12 +4050,18 @@ class InventoryEditor(wx.Frame):
                     button.SetName('EnderButton')
                     button.Bind(wx.EVT_BUTTON, self.ender_chest)
                     button.SetForegroundColour((0, 255, 0))
-                    self.grid_sizer.Add(button, 0, wx.TOP, 5)
+                    target_sizer.Add(button, 0, wx.TOP, _ui_metric(self, 4, 6))
                 else:
                     divider_line = wx.StaticLine(self.scroll_panel, style=wx.LI_HORIZONTAL)
-                    self.grid_sizer.Add(divider_line, 0, wx.TOP, 15)
+                    target_sizer.Add(divider_line, 0, wx.TOP, _ui_metric(self, 4, 6))
         if "Inventory Editor" in self.GetTitle():
-            self.grid_sizer = wx.GridSizer(6, 9, -10, 5)
+            # Keep equipment, inventory, divider, and hotbar in separate sizers.
+            # A shared grid gives the divider an unwanted full-slot row height.
+            self.grid_sizer = wx.BoxSizer(wx.VERTICAL)
+            grid_gap = _ui_metric(self, 4, 10)
+            top_grid = wx.GridSizer(1, 9, grid_gap, grid_gap)
+            inventory_grid = wx.GridSizer(3, 9, grid_gap, grid_gap)
+            hotbar_grid = wx.GridSizer(1, 9, grid_gap, grid_gap)
 
             for i in range(4):
                 item = self.inventory.get('Armor', [None] * 4)[i]
@@ -1348,19 +4069,16 @@ class InventoryEditor(wx.Frame):
                 display_name = self.resources.get(item_name, {}).get("display_name", "Empty")
                 display_name = more_display_info(display_name, item)
                 count = item.get("Count", 1) if item else 0
-
-
-                # Try to get icon, fallback to NullBitmap
                 icon_bitmap = self.resources.get_scaled_cache.get(item_name, wx.NullBitmap)
 
-                button = IconButton(self.scroll_panel, item_name, display_name, count, icon_bitmap, i , self)
+                button = IconButton(self.scroll_panel, item_name, display_name, count, icon_bitmap, i, self)
                 button.HideButtonValue()
                 button.Set_slot_map_key('Armor', i)
-                self.grid_sizer.Add(button, 0, wx.CENTRE, 1)
-                self.slot_map[('Armor' , i)] = button
+                top_grid.Add(button, 0, wx.CENTRE | wx.ALL, _ui_metric(self, 2, 4))
+                self.slot_map[('Armor', i)] = button
                 armor_buttons.append(button)
 
-            middle_slots(4)
+            middle_slots(4, target_sizer=top_grid)
 
             offhand_item = next((item for item in self.inventory.get('Offhand', [])), None)
             item_name = offhand_item["Name"].py_str[10:] if offhand_item and "Name" in offhand_item else ''
@@ -1368,31 +4086,54 @@ class InventoryEditor(wx.Frame):
             display_name = more_display_info(display_name, offhand_item)
             count = offhand_item.get("Count", 1) if offhand_item else 0
             icon_bitmap = self.resources.get_scaled_cache.get(item_name)
-
             offhand_button = IconButton(self.scroll_panel, item_name, display_name, count, icon_bitmap, 0, self)
-
             offhand_button.SetBackgroundColour((0, 255, 0))
+            top_grid.Add(offhand_button, 0, wx.CENTRE | wx.ALL, _ui_metric(self, 2, 4))
+            self.slot_map[('Offhand', 0)] = offhand_button
+            offhand_button.Set_slot_map_key('Offhand', 0)
 
-            self.grid_sizer.Add(offhand_button, 0, wx.ALIGN_TOP, 1)
-            self.slot_map[('Offhand',0)] = offhand_button
-            offhand_button.Set_slot_map_key('Offhand',0)
-            range_order = list(range(9, 36)) + list(range(0, 9))
-            for slot in range_order:
+            for slot in range(9, 36):
                 item = next((i for i in self.inventory.get('Inventory', []) if i.get("Slot").py_int == slot), None)
                 item_name = processes_item_iter_next(item)
                 display_name = self.resources.get(item_name, {}).get("display_name", item_name)
                 display_name = more_display_info(display_name, item)
                 count = item.get("Count", 1) if item else 0
                 icon_bitmap = self.resources.get_scaled_cache.get(item_name)
-                if icon_bitmap:
-                    icon_bitmap = icon_bitmap
                 button = IconButton(self.scroll_panel, item_name, display_name, count, icon_bitmap, slot, self)
-
-                if slot == 0:
-                    middle_slots(9, main=False, not_extra=False)
-                self.grid_sizer.Add(button, 0, wx.TOP, -15 if slot < 9 else 10)
+                inventory_grid.Add(button, 0, wx.ALL | wx.ALIGN_CENTER, _ui_metric(self, 2, 4))
                 self.slot_map[('Inventory', slot)] = button
                 button.Set_slot_map_key('Inventory', slot)
+
+            hotbar_divider = wx.BoxSizer(wx.HORIZONTAL)
+            left_line = wx.StaticLine(self.scroll_panel, style=wx.LI_HORIZONTAL)
+            hotbar_label = wx.StaticText(self.scroll_panel, label="Hotbar")
+            hotbar_label.SetForegroundColour((0, 255, 0))
+            hotbar_font_size = _ui_metric(self, 12, 14)
+            hotbar_label.SetFont(wx.Font(hotbar_font_size, wx.FONTFAMILY_ROMAN, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
+            right_line = wx.StaticLine(self.scroll_panel, style=wx.LI_HORIZONTAL)
+            divider_gap = _ui_metric(self, 8, 12)
+            hotbar_divider.Add(left_line, 1, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, divider_gap)
+            hotbar_divider.Add(hotbar_label, 0, wx.ALIGN_CENTER_VERTICAL)
+            hotbar_divider.Add(right_line, 1, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, divider_gap)
+
+            for slot in range(0, 9):
+                item = next((i for i in self.inventory.get('Inventory', []) if i.get("Slot").py_int == slot), None)
+                item_name = processes_item_iter_next(item)
+                display_name = self.resources.get(item_name, {}).get("display_name", item_name)
+                display_name = more_display_info(display_name, item)
+                count = item.get("Count", 1) if item else 0
+                icon_bitmap = self.resources.get_scaled_cache.get(item_name)
+                button = IconButton(self.scroll_panel, item_name, display_name, count, icon_bitmap, slot, self)
+                hotbar_grid.Add(button, 0, wx.ALL | wx.ALIGN_CENTER, _ui_metric(self, 2, 4))
+                self.slot_map[('Inventory', slot)] = button
+                button.Set_slot_map_key('Inventory', slot)
+
+            outer_pad = _ui_metric(self, 4, 8)
+            divider_pad = _ui_metric(self, 7, 12)
+            self.grid_sizer.Add(top_grid, 0, wx.ALIGN_CENTER | wx.LEFT | wx.RIGHT | wx.TOP, outer_pad)
+            self.grid_sizer.Add(inventory_grid, 0, wx.ALIGN_CENTER | wx.LEFT | wx.RIGHT | wx.TOP, outer_pad)
+            self.grid_sizer.Add(hotbar_divider, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP | wx.BOTTOM, divider_pad)
+            self.grid_sizer.Add(hotbar_grid, 0, wx.ALIGN_CENTER | wx.LEFT | wx.RIGHT | wx.BOTTOM, outer_pad)
         else:
             CONTAINER_CONFIG = {
                 "Bundle": {
@@ -1424,14 +4165,14 @@ class InventoryEditor(wx.Frame):
                     "middle": 3,
                 },
                 "Chest": {
-                    # A single chest has 27 slots, arranged 3 rows × 9 columns
+                    # A single chest has 27 slots, arranged 3 rows x 9 columns
                     "grid": (4, 9),
                     "key": "Items",
                     "order": list(range(27)),
                     "middle": 9,
                 },
                 "Barrel": {
-                    # Barrel also has 27 slots, 3 rows × 9 columns
+                    # Barrel also has 27 slots, 3 rows x 9 columns
                     "grid": (4, 9),
                     "key": "Items",
                     "order": list(range(27)),
@@ -1442,19 +4183,16 @@ class InventoryEditor(wx.Frame):
 
             for keyword, cfg in CONTAINER_CONFIG.items():
                 if keyword in title:
-                    # 1) Apply size if given
-                    if "size" in cfg:
-                        self.SetSize(*cfg["size"])
-
-                    # 2) Create the grid sizer
+                    # Let the content and display-aware fit pass determine frame size.
                     rows, cols = cfg["grid"]
-                    self.grid_sizer = wx.GridSizer(rows, cols, 5, 5)
+                    container_gap = _ui_metric(self, 4, 10)
+                    self.grid_sizer = wx.GridSizer(rows, cols, container_gap, container_gap)
 
-                    # 3) Pick the NBT key and slot order
+                    # Pick the NBT key and slot order
                     key = cfg["key"]
                     range_order = cfg["order"]
 
-                    # 4) Call your helper to center mid‐row slots
+                    # 4) Call the helper to center mid-row slots
                     middle_slots(cfg["middle"], main=False)
                     break
             else:
@@ -1500,31 +4238,64 @@ class InventoryEditor(wx.Frame):
 
 class IconListCtrl(wx.Frame):
     def __init__(self, parent, title, data, slot):
-        super().__init__(parent, title=title, size=(1110, 800), style=wx.DEFAULT_FRAME_STYLE | wx.STAY_ON_TOP)
+        super().__init__(parent, title=title, size=(980, 700), style=_float_on_parent_style())
+        self._catalog_scale = _ui_dpi_scale(self)
         self.parent = parent
         self.data = data
         self.editor = self.data
-        self.font = wx.Font(11, wx.FONTFAMILY_ROMAN, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD)
+        self.font = wx.Font(_ui_metric(self, 11, 12), wx.FONTFAMILY_ROMAN, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD)
+        self.item_font = wx.Font(_ui_metric(self, 10, 11), wx.FONTFAMILY_ROMAN, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD)
         self.SetFont(self.font)
         self.bmp = 0
-        self.icon_size = 64
+        # Calibrated logical icon size.  The bitmap added to wx.ImageList is
+        # rebuilt to this exact same logical size below, which avoids the
+        # ImageList mismatch that caused the earlier image-loading regression.
+        # Catalog artwork is calibrated separately from the surrounding cell
+        # geometry.  Keep the 100% icon modest, add a small midpoint increase,
+        # and give the 225% endpoint enough artwork to remain visually balanced
+        # with the larger native text without changing atlas data.
+        self.icon_size = _ui_metric_three(self, 68, 76, 104)
         self.panel = wx.Panel(self)
         self.list_ctrl = wx.ListCtrl(self.panel, style=wx.LC_ICON)
+        self.list_ctrl.SetFont(self.item_font)
         self.image_list = wx.ImageList(self.icon_size, self.icon_size)
         self.list_ctrl.AssignImageList(self.image_list, wx.IMAGE_LIST_NORMAL)
+        # Keep label cells visually consistent as Windows DPI increases.  The
+        # ImageList and every bitmap placed in it now use the same calibrated
+        # logical dimensions, so higher-DPI Catalogs get larger artwork without
+        # relying on native bitmap-scale metadata.
+        self._set_catalog_icon_spacing(
+            # Five columns fit cleanly at all three calibrated displays.  The
+            # 1080p endpoint needs slightly narrower cells; 1440p/150% and
+            # 4K/225% already had good label room, so keep those nearly intact.
+            _ui_metric_three(self, 178, 205, 260),
+            _ui_metric_three(self, 142, 150, 185),
+        )
 
         self.list_ctrl.SetForegroundColour((0, 255, 0))
         self.list_ctrl.SetBackgroundColour((0, 0, 0))
 
-        self.drag_image =None
+        # Track Catalog dragging by active state, not by attribute existence.
+        # drag_image may exist with a None value even when there is no drag.
+        self.drag_image = None
+        self.dragged_index = None
+        self.dragged_id = None
         self.dragging = False
         self.index_to_bedrock = {}
         self.all_items = []
 
         panel_sizer = wx.BoxSizer(wx.VERTICAL)
         panel_horz = wx.BoxSizer(wx.HORIZONTAL)
-        self.button = wx.Button(self.panel, size=(100, 30), label="Filter")
-        self.filterstring = wx.TextCtrl(self.panel, size=(100, 30), style=wx.TE_PROCESS_ENTER)
+        # Preserve a native-height Filter button and scale the search field
+        # horizontally to retain usable proportions at higher display scaling.
+        self.button = wx.Button(self.panel, label="Filter")
+        self.filterstring = wx.TextCtrl(self.panel, style=wx.TE_PROCESS_ENTER)
+        self.button.SetFont(self.font)
+        self.filterstring.SetFont(self.font)
+        self._size_catalog_filter_controls(
+            _ui_metric(self, 160, 190),
+            _ui_metric_three(self, 400, 470, 560),
+        )
 
         self.list_ctrl.Bind(wx.EVT_LEFT_DOWN, self.OnMouseDown)
         self.list_ctrl.Bind(wx.EVT_MOTION, self.OnMouseMove)
@@ -1533,28 +4304,94 @@ class IconListCtrl(wx.Frame):
         self.button.Bind(wx.EVT_BUTTON, self.filter_string)
         self.filterstring.Bind(wx.EVT_TEXT_ENTER, self.filter_string)
 
-        panel_horz.Add(self.button)
-        panel_horz.Add(self.filterstring)
-        panel_sizer.Add(panel_horz)
-        panel_sizer.Add(self.list_ctrl, 3, flag=wx.EXPAND)
+        panel_horz.Add(self.button, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 6)
+        panel_horz.Add(self.filterstring, 0, wx.TOP | wx.BOTTOM | wx.RIGHT | wx.ALIGN_CENTER_VERTICAL, 6)
+        panel_sizer.Add(panel_horz, 0, wx.EXPAND)
+        panel_sizer.Add(self.list_ctrl, 1, flag=wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, border=6)
         self.panel.SetSizerAndFit(panel_sizer)
 
         self.Bind(wx.EVT_CLOSE, self.on_close)
+        if hasattr(wx, 'EVT_WINDOW_DESTROY'):
+            self.Bind(wx.EVT_WINDOW_DESTROY, self._on_destroy)
         self.item_index = -1
         self.load_all_items()
+        display = wx.GetClientDisplayRect()
+        desired_width = _ui_metric(self, 940, 1420)
+        desired_height = _ui_metric(self, 660, 920)
+        catalog_width = min(desired_width, int(display.width * 0.90))
+        catalog_height = min(desired_height, int(display.height * 0.86))
+        min_width = min(catalog_width, _ui_metric(self, 680, 1080))
+        min_height = min(catalog_height, _ui_metric(self, 480, 700))
+        self.SetClientSize(wx.Size(catalog_width, catalog_height))
+        self.SetMinSize(wx.Size(min_width, min_height))
         self.Layout()
+        _clamp_window_to_display(self, 0.94, 0.90)
+        if hasattr(wx, 'EVT_DISPLAY_CHANGED'):
+            self.Bind(wx.EVT_DISPLAY_CHANGED, self._on_display_metrics_changed)
+        if hasattr(wx, 'EVT_DPI_CHANGED'):
+            self.Bind(wx.EVT_DPI_CHANGED, self._on_display_metrics_changed)
+
+    def _on_display_metrics_changed(self, event):
+        self._catalog_scale = _ui_dpi_scale(self)
+        display = wx.GetClientDisplayRect()
+        width = min(_ui_metric(self, 940, 1420), int(display.width * 0.90))
+        height = min(_ui_metric(self, 660, 920), int(display.height * 0.86))
+        self.SetClientSize(wx.Size(width, height))
+        _clamp_window_to_display(self, 0.94, 0.90)
+        if event is not None:
+            event.Skip()
+
+    def _size_catalog_filter_controls(self, button_width, search_width):
+        """Match Filter/search heights using their font-aware native best size."""
+        # Best-size values are font- and platform-dependent.  Recompute them
+        # after applying the Catalog font, then use the larger native height so
+        # the adjacent controls stay aligned without hard-coding a DPI height.
+        for control in (self.button, self.filterstring):
+            try:
+                control.InvalidateBestSize()
+            except Exception:
+                pass
+
+        try:
+            button_best = self.button.GetBestSize()
+            search_best = self.filterstring.GetBestSize()
+            native_height = max(int(button_best.height), int(search_best.height), 1)
+        except Exception:
+            native_height = wx.DefaultCoord
+
+        self.button.SetInitialSize(wx.Size(int(button_width), native_height))
+        self.filterstring.SetInitialSize(wx.Size(int(search_width), native_height))
+
+    def _set_catalog_icon_spacing(self, width, height):
+        """Give native icon-view labels enough room to avoid unnecessary ellipsis."""
+        try:
+            set_spacing = getattr(self.list_ctrl, 'SetItemSpacing', None)
+            if callable(set_spacing):
+                set_spacing(wx.Size(width, height))
+                return
+        except Exception:
+            pass
+
+        # wx.ListCtrl does not expose icon spacing in every wxPython build.
+        # Amulet 0.10 on Windows uses the native list-view control, where the
+        # documented LVM_SETICONSPACING message provides the same adjustment.
+        if sys.platform.startswith('win'):
+            try:
+                hwnd = int(self.list_ctrl.GetHandle())
+                lvm_seticonspacing = 0x1000 + 53
+                packed_spacing = ((int(height) & 0xFFFF) << 16) | (int(width) & 0xFFFF)
+                ctypes.windll.user32.SendMessageW(hwnd, lvm_seticonspacing, 0, packed_spacing)
+            except Exception:
+                pass
 
     def OnMouseMove(self, event):
-        if hasattr(self, "drag_image") and event.Dragging() and event.LeftIsDown():
-            self.drag_image.Move(event.GetPosition())
+        drag_image = getattr(self, "drag_image", None)
+        if drag_image is not None and event.Dragging() and event.LeftIsDown():
+            drag_image.Move(event.GetPosition())
 
     def OnMouseDown(self, event):
         pos = event.GetPosition()
         index = self.list_ctrl.HitTest(pos)[0]
-
-
-        # Convert to screen coordinates
-        screen_pos = event.GetEventObject().ClientToScreen(pos)
         if index == wx.NOT_FOUND:
             return
 
@@ -1566,55 +4403,94 @@ class IconListCtrl(wx.Frame):
 
         image_index = self.list_ctrl.GetItem(index).GetImage()
         bmp = self.image_list.GetBitmap(image_index)
+        if not bmp or not bmp.IsOk():
+            return
 
         self.dragged_index = index
-        self.drag_image = wx.DragImage(bmp)
-        self.drag_image.BeginDrag((30, 30), self.list_ctrl, fullScreen=True)
-        self.drag_image.Move(screen_pos)
-        self.drag_image.Show()
-
-        self.list_ctrl.CaptureMouse()
-
-    def OnMouseUp(self, evt):
-
-        if hasattr(self, "drag_image"):
-            self.drag_image.Hide()
-
-        if self.list_ctrl.HasCapture():
+        self.dragged_id = bedrock_id
+        drag_image = wx.DragImage(bmp)
+        try:
+            if not drag_image.BeginDrag((30, 30), self.list_ctrl, fullScreen=True):
+                self.dragged_index = None
+                self.dragged_id = None
+                return
+            # wx.DragImage.Move() uses client coordinates relative to the
+            # BeginDrag window, even when full-screen dragging is enabled.
+            drag_image.Move(pos)
+            drag_image.Show()
+            self.drag_image = drag_image
+        except Exception:
             try:
-                self.list_ctrl.ReleaseMouse()
-            except Exception:
-                pass  # swallow any error
-
-        if hasattr(self, "drag_image"):
-            try:
-                self.drag_image.EndDrag()
+                drag_image.EndDrag()
             except Exception:
                 pass
-            finally:
-                del self.drag_image
+            self.drag_image = None
+            self.dragged_index = None
+            self.dragged_id = None
+            raise
 
+    def OnMouseUp(self, evt):
+        drag_image = getattr(self, "drag_image", None)
+        dragged_index = getattr(self, "dragged_index", None)
+        dragged_id = getattr(self, "dragged_id", None)
+
+        # BeginDrag/EndDrag own mouse capture.  Only finalise a drag when one
+        # was actually created; a normal click or stray mouse-up is harmless.
+        if drag_image is not None:
+            try:
+                drag_image.Hide()
+            except Exception:
+                pass
+            try:
+                drag_image.EndDrag()
+            except Exception:
+                pass
+
+        self.drag_image = None
 
         screen_pt = self.list_ctrl.ClientToScreen(evt.GetPosition())
-        if self.button.GetScreenRect().Contains(screen_pt):
-            bmp = self.image_list.GetBitmap(self.dragged_index)
-            self.button.SetBitmap(bmp)
-            self.button.SetToolTip(self.dragged_id)
+        if (
+            dragged_index is not None
+            and dragged_id
+            and self.button.GetScreenRect().Contains(screen_pt)
+        ):
+            try:
+                image_index = self.list_ctrl.GetItem(dragged_index).GetImage()
+                bmp = self.image_list.GetBitmap(image_index)
+                if bmp and bmp.IsOk():
+                    self.button.SetBitmap(bmp)
+                    self.button.SetToolTip(dragged_id)
+            except Exception:
+                pass
 
-        if hasattr(self, "dragged_index"):
-            del self.dragged_index
-        if hasattr(self, "dragged_id"):
-            del self.dragged_id
+        self.dragged_index = None
+        self.dragged_id = None
 
         # Here, simulate a successful drop by directly handling the position
 
     def on_close(self, event):
-        self.HideWithEffect(effect=wx.SHOW_EFFECT_BLEND)
+        # Keep the Catalog reusable while its owning InventoryEditor remains alive.
+        try:
+            self.HideWithEffect(effect=wx.SHOW_EFFECT_BLEND)
+        except Exception:
+            self.Hide()
+
+    def _on_destroy(self, event):
+        try:
+            if event.GetEventObject() is self and WINDOW.get('catalog') is self:
+                WINDOW['catalog'] = None
+        except Exception:
+            WINDOW['catalog'] = None
+        if event is not None:
+            event.Skip()
 
     def update_data(self, data):
         self.data = data
+        self.editor = data
 
     def update_slot(self, slot):
+        if slot is None:
+            return
         self.inv_slot = slot[1]
         self.key_slot = slot
 
@@ -1623,16 +4499,57 @@ class IconListCtrl(wx.Frame):
         self.image_list.RemoveAll()
         self.list_ctrl.DeleteAllItems()
 
-        scaled_cache = self.data.resources.get_scaled_cache  # Cache shortcut
+        scaled_cache = self.data.resources.get_scaled_cache
+        source_cache = self.data.resources.get_icon_cache
         json_data = self.data.resources.get_json_data
+        nearest_quality = getattr(
+            wx, "IMAGE_QUALITY_NEAREST", getattr(wx, "IMAGE_QUALITY_NORMAL", 0)
+        )
+        reduction_quality = getattr(
+            wx, "IMAGE_QUALITY_HIGH",
+            getattr(wx, "IMAGE_QUALITY_BILINEAR", getattr(wx, "IMAGE_QUALITY_NORMAL", 0)),
+        )
 
         for bedrock_id, info in json_data.items():
             if bedrock_id == 'banner':
                 continue
 
             display_name = info.get('display_name', '')
-            bmp = scaled_cache.get(bedrock_id)
-            if bmp:
+            bmp = wx.NullBitmap
+
+            # Build from the preferred source cell: validated 128 x 128 master
+            # where available, otherwise the original 32 x 32 compatibility cell.
+            try:
+                source = source_cache.get(bedrock_id)
+                if source is not None and source.IsOk():
+                    quality = (
+                        reduction_quality
+                        if source.GetWidth() > self.icon_size or source.GetHeight() > self.icon_size
+                        else nearest_quality
+                    )
+                    img = source.Scale(
+                        self.icon_size, self.icon_size, quality
+                    )
+                    if img.IsOk():
+                        bmp = img.ConvertToBitmap()
+            except Exception:
+                bmp = wx.NullBitmap
+
+            if not bmp or not bmp.IsOk():
+                fallback = scaled_cache.get(bedrock_id)
+                try:
+                    if fallback and fallback.IsOk():
+                        img = fallback.ConvertToImage()
+                        if img.IsOk() and (img.GetWidth(), img.GetHeight()) != (self.icon_size, self.icon_size):
+                            img = img.Scale(
+                                self.icon_size, self.icon_size, nearest_quality
+                            )
+                        if img.IsOk():
+                            bmp = img.ConvertToBitmap()
+                except Exception:
+                    bmp = wx.NullBitmap
+
+            if bmp and bmp.IsOk():
                 icon_index = self.image_list.Add(bmp)
                 self.all_items.append((bedrock_id, display_name, icon_index))
 
@@ -1652,32 +4569,12 @@ class IconListCtrl(wx.Frame):
         filter_val = self.filterstring.GetValue()
         self.show_filtered_items(filter_val)
 
-    def create_catalog_menu(self):
-        for category, item_range in categories.items():
-            menu_item = wx.MenuItem(self.catalog_menu, wx.ID_ANY, category)
-            self.catalog_menu.Append(menu_item)
-            self.Bind(wx.EVT_MENU, self.create_filter_callback(category, item_range), menu_item)
 
-    def create_filter_callback(self, category, item_range):
-        def filter_items(event):
-            if category == "All":
-                self.show_filtered_items('')
-            else:
-                valid_keys = [key for i, key in enumerate(self.data.resources.get_json_data.keys()) if i in item_range]
-                self.show_filtered_items_for_keys(valid_keys)
-        return filter_items
 
-    def show_filtered_items_for_keys(self, allowed_keys):
-        self.list_ctrl.DeleteAllItems()
-        self.index_to_bedrock.clear()
-        for bedrock_id, display_name, icon_index in self.all_items:
-            if bedrock_id in allowed_keys:
-                index = self.list_ctrl.InsertItem(self.list_ctrl.GetItemCount(), display_name, icon_index)
-                self.index_to_bedrock[index] = bedrock_id
 
 class TAGEditor(wx.Frame):
     def __init__(self, parent,title, _self, last_key, slot):
-        super().__init__(parent, title=title, size=(600, 500), style=wx.DEFAULT_FRAME_STYLE | wx.STAY_ON_TOP)
+        super().__init__(parent, title=title, size=(600, 500), style=_float_on_parent_style())
         self._self = _self
         title = _self.Parent.Parent.GetTitle()
         # Determine the slot number, ensuring it is valid
@@ -1690,9 +4587,8 @@ class TAGEditor(wx.Frame):
                     slot = i
 
         self.nbt_data = current_nbt[slot]
-        panel = scrolled.ScrolledPanel(self, style=wx.VSCROLL)
-        panel.SetScrollRate(5, 5)
-        self.font = wx.Font(20, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD)
+        panel = wx.Panel(self)
+        self.font = wx.Font(11, wx.FONTFAMILY_TELETYPE, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL)
         self.sizer = wx.BoxSizer(wx.VERTICAL)
         snbt_text = self.nbt_data.to_snbt(4)
 
@@ -1711,8 +4607,13 @@ class TAGEditor(wx.Frame):
         self.sizer.Add(save_button, 0, wx.CENTER | wx.BOTTOM, 10)
 
         panel.SetSizer(self.sizer)
-        panel.Layout()
-
+        frame_sizer = wx.BoxSizer(wx.VERTICAL)
+        frame_sizer.Add(panel, 1, wx.EXPAND)
+        self.SetSizer(frame_sizer)
+        self.SetMinSize(self.FromDIP(wx.Size(450, 330)))
+        self.SetClientSize(self.FromDIP(wx.Size(650, 460)))
+        self.CentreOnParent()
+        _clamp_window_to_display(self)
         self.Show()
 
 
@@ -1740,7 +4641,6 @@ class TAGEditor(wx.Frame):
 
         self._self.editor.selected_player.save_player()
         self._self.SetTagData(nbt)
-        # self._self.onclick_get_set_tag_data
         self._self.Refresh()
 
 
@@ -1830,7 +4730,7 @@ PATTERN_KEY_TO_NAME = {
 
 class BannerSelector(wx.Frame):
     def __init__(self, parent, _self):
-        super().__init__(None, title="Banner Selector", size=(545, 560),style=wx.DEFAULT_FRAME_STYLE | wx.STAY_ON_TOP)
+        super().__init__(_self, title="Banner Selector", size=(545, 560), style=_float_on_parent_style())
         self._self = _self
         self.parent = parent
         self.panel = wx.Panel(self)
@@ -1852,8 +4752,6 @@ class BannerSelector(wx.Frame):
         self.pattern_panel.SetScrollRate(10, 10)
         self.pattern_sizer = wx.GridSizer(rows=0, cols=7, vgap=5, hgap=5)
         self.pattern_panel.SetSizer(self.pattern_sizer)
-        # self.pattern_panel.SetForegroundColour((100,255,100))
-        # # self.pattern_panel.SetForegroundColour((0, 0, 0))
         self.left_sizer.Add(self.pattern_panel, 1, wx.EXPAND | wx.ALL, 5)
 
         # Color selection
@@ -1938,7 +4836,6 @@ class BannerSelector(wx.Frame):
         banner = base64.b64decode(BANNER['ICONS'])
         buffer = io.BytesIO(banner)
         base = wx.Image()
-        # base.LoadFile(buffer, wx.BITMAP_TYPE_PNG)
         base = Image.open(buffer)
         self.base_images = []
         self.pattern_images = []
@@ -2151,8 +5048,8 @@ STYLE_CODES = {
 
 class BedrockNameTagAndLoreEditor(wx.Frame):
     def __init__(self, _self, ):
-        super().__init__(None, title="Bedrock Name and Lore Editor", size=(650, 330),style=wx.DEFAULT_FRAME_STYLE | wx.STAY_ON_TOP)
-        panel = wx.Panel(self)
+        super().__init__(_self, title="Bedrock Name and Lore Editor", size=(650, 330), style=_float_on_parent_style())
+        panel = scrolled.ScrolledPanel(self, style=wx.VSCROLL)
         main_sizer = wx.BoxSizer(wx.VERTICAL)
 
         self._self = _self
@@ -2186,36 +5083,38 @@ class BedrockNameTagAndLoreEditor(wx.Frame):
         # Item Name
         main_sizer.Add(wx.StaticText(panel, label="Item Name:"), 0, wx.ALL, 5)
         self.name_input = rt.RichTextCtrl(panel, style=wx.VSCROLL | wx.HSCROLL | wx.TE_MULTILINE | wx.NO_BORDER,
-                                          size=(-1, 30))
+                                          size=(-1, self.FromDIP(40)))
         self.name_input.SetFont(wx.Font(12, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL))
         main_sizer.Add(self.name_input, 0, wx.EXPAND | wx.ALL, 5)
 
         # Lore Editor
         main_sizer.Add(wx.StaticText(panel, label="Lore Editor:"), 0, wx.ALL, 5)
         self.lore_input = rt.RichTextCtrl(panel, style=wx.VSCROLL | wx.HSCROLL | wx.TE_MULTILINE | wx.NO_BORDER,
-                                          size=(-1, 80))
+                                          size=(-1, self.FromDIP(120)))
         self.lore_input.SetFont(wx.Font(12, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL))
         main_sizer.Add(self.lore_input, 0, wx.EXPAND | wx.ALL, 5)
 
-        # Format Bar
         format_bar = wx.BoxSizer(wx.HORIZONTAL)
         self.color_choice = wx.Choice(panel, choices=list(COLOR_CODES.keys()))
         self.color_choice.SetSelection(0)
+        self.color_choice.SetMinSize(wx.Size(self.FromDIP(150), -1))
         format_bar.Add(wx.StaticText(panel, label="Color:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
-        format_bar.Add(self.color_choice, 0, wx.RIGHT, 10)
+        format_bar.Add(self.color_choice, 0, wx.RIGHT, 12)
 
         self.style_checkboxes = {}
-
-
         for style in STYLE_CODES:
             cb = wx.CheckBox(panel, label=style)
             self.style_checkboxes[style] = cb
-            format_bar.Add(cb, 0, wx.RIGHT, 5)
 
         apply_btn = wx.Button(panel, label="Apply to Selection")
         apply_btn.Bind(wx.EVT_BUTTON, self.on_apply_format)
-        format_bar.Add(apply_btn, 0, wx.LEFT, 10)
-        main_sizer.Add(format_bar, 0, wx.EXPAND | wx.ALL, 5)
+        format_bar.Add(apply_btn, 0, wx.ALIGN_CENTER_VERTICAL)
+        main_sizer.Add(format_bar, 0, wx.EXPAND | wx.ALL, 8)
+
+        style_grid = wx.GridSizer(rows=0, cols=3, vgap=8, hgap=12)
+        for cb in self.style_checkboxes.values():
+            style_grid.Add(cb, 0, wx.EXPAND)
+        main_sizer.Add(style_grid, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
 
         # Preview
         main_sizer.Add(wx.StaticText(panel, label="Preview:"), 0, wx.LEFT | wx.TOP, 5)
@@ -2227,12 +5126,13 @@ class BedrockNameTagAndLoreEditor(wx.Frame):
         gen_btn.Bind(wx.EVT_BUTTON, self.on_generate)
         main_sizer.Add(gen_btn, 0, wx.CENTER | wx.ALL, 5)
 
-        # Output Box
-        # main_sizer.Add(wx.StaticText(panel, label="Output JSON:"), 0, wx.LEFT | wx.TOP, 5)
-        # self.output_box = wx.TextCtrl(panel, style=wx.TE_MULTILINE | wx.TE_READONLY)
-        # main_sizer.Add(self.output_box, 1, wx.EXPAND | wx.ALL, 5)
 
         panel.SetSizer(main_sizer)
+        frame_sizer = wx.BoxSizer(wx.VERTICAL)
+        frame_sizer.Add(panel, 1, wx.EXPAND)
+        self.SetSizer(frame_sizer)
+        self.SetMinSize(self.FromDIP(wx.Size(510, 350)))
+        self.SetClientSize(self.FromDIP(wx.Size(700, 490)))
         if name:
             self.load_formatted_text(self.name_input, self.name)
         if lore:
@@ -2240,7 +5140,9 @@ class BedrockNameTagAndLoreEditor(wx.Frame):
                 self.load_formatted_text(self.lore_input, line.py_str)
                 self.lore_input.WriteText("\n")
 
-        self.Centre()
+        panel.SetupScrolling(scroll_x=False, scroll_y=True, rate_y=10)
+        self.CentreOnParent()
+        _clamp_window_to_display(self)
         self.Show()
 
     def load_formatted_text(self, ctrl, formatted_text):
@@ -2420,7 +5322,6 @@ class ItemTools:
                     return
 
         # If nothing matched, don't copy anything
-        #             CLIP_BOARD['COPY'] = None
 
     def paste_tag(self, _self):
         key, slot_number = _self.Get_slot_map_key()
@@ -2467,44 +5368,11 @@ class ItemTools:
         _self.Layout()
         _self.Refresh()
 
-    def move_tag(self, _self):  # Not really need
-        keys = _self.editor.keys + list(_self.Get_slot_map_key())
-        current_nbt = _self.editor.selected_player[keys]
-
-        print(current_nbt)
-
-        copy_nbt = CLIP_BOARD['COPY']
-
-        bedrock_id = copy_nbt['Name'].py_str.split(':')[1]
-        slot = keys[-1]
-
-        copy_nbt['Slot'] = ByteTag(slot)
-        _self.SetValue(int(copy_nbt['Count']))
-        title = _self.Parent.Parent.GetTitle()
-
-        display_name = self.icon_resources.get_json_data[bedrock_id]['display_name']
-        icon = self.icon_resources.get_scaled_cache[bedrock_id]
-        _self.SetBitmap(icon, display_name)
-        _self.editor.selected_player[keys] = copy_nbt
-
-        _self.button.SetName(bedrock_id)
-        _self.editor.selected_player.save_player()
-        _self.Layout()
-        _self.Refresh()
 
     def delete_slot(self, _self):
         _self.bedrock_id = ''
 
         _self.button.SetName('Empty')
-        # _self.tag_data = CompoundTag({
-        #     'Name': StringTag(""),
-        #     'Count': ByteTag(0),
-        #     'Damage': ShortTag(0),
-        #     'Slot': ByteTag(_self.slot),
-        #     'WasPickedUp': ByteTag(0),
-        # 'tag': CompoundTag({
-        #     'Damage' : ShortTag(0)
-        # })})
         _self.clear_bitmap()
         _self.SetBitmap(wx.NullBitmap, "Empty")
         _self.count_box.SetValue("0")
@@ -2512,7 +5380,6 @@ class ItemTools:
         _self.Layout()
         _self.Refresh()
 
-        # _self.onclick_get_set_tag_data()
         _self.Layout()
         _self.Refresh()
 
@@ -2553,7 +5420,6 @@ class ItemTools:
             material_key = material_dict.get(selected_material, None)
             color_key = custom_color_dict.get(selected_color, None)
 
-            # If any value is None, we return early or handle the error as needed
             if not trim_key or not material_key:
                 print("Error: Invalid selection(s).")
                 return
@@ -2561,7 +5427,6 @@ class ItemTools:
             # Example of how to modify the current NBT data (assuming the data is structured correctly)
             keys = _self.editor.keys + list(_self.Get_slot_map_key())
             current_nbt_data = _self.editor.selected_player[keys]
-            # current_nbt_data = _self.GetTheData[-1]  # Fetch the NBT data
             if current_nbt_data.get('tag', None):
                 current_nbt_data['tag']['Trim'] = CompoundTag({
                     'Material': StringTag(material_key),
@@ -2595,11 +5460,11 @@ class ItemTools:
 
         current_nbt_data = _self.editor.selected_player[keys]
         panel = wx.Frame(_self, title="Edit Armor Trim", size=(400, 400),
-                         style=wx.DEFAULT_FRAME_STYLE | wx.STAY_ON_TOP)
+                         style=_float_on_parent_style())
         sizer = wx.BoxSizer(wx.VERTICAL)
         remove_all_btn = wx.Button(panel, label="Clear All Trims")
         remove_all_btn.Bind(wx.EVT_BUTTON, on_remove_all)
-        sizer.Add(remove_all_btn)
+        sizer.Add(remove_all_btn, 0, wx.ALL, 10)
         # Trim Selection
         trim_label = wx.StaticText(panel, label="Select Trim")
         sizer.Add(trim_label, 0, wx.ALL, 5)
@@ -2612,7 +5477,8 @@ class ItemTools:
             trim_choice.SetStringSelection(reversed_trims_dict.get(current_trim.py_str, ""))
         else:
             trim_choice.SetSelection(-1)  # Default to first item if no current value
-        sizer.Add(trim_choice, 0, wx.ALL, 5)
+        trim_choice.SetMinSize(wx.Size(panel.FromDIP(290), -1))
+        sizer.Add(trim_choice, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
 
         # Material Selection
         material_label = wx.StaticText(panel, label="Select Material")
@@ -2625,7 +5491,8 @@ class ItemTools:
             material_choice.SetStringSelection(current_material.py_str)
         else:
             material_choice.SetSelection(-1)  # Default to first item if no current value
-        sizer.Add(material_choice, 0, wx.ALL, 5)
+        material_choice.SetMinSize(wx.Size(panel.FromDIP(290), -1))
+        sizer.Add(material_choice, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
 
         # Custom Color Selection
 
@@ -2641,23 +5508,26 @@ class ItemTools:
             color_choice.SetStringSelection(color_name)  # Set the color name based on the hex value
         else:
             color_choice.SetSelection(-1)  # Default to first item if no current value
-        sizer.Add(color_choice, 0, wx.ALL, 5)
+        color_choice.SetMinSize(wx.Size(panel.FromDIP(290), -1))
+        sizer.Add(color_choice, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
         if not "leather" in _self.GetTheData[1]:
+            color_label.Hide()
             color_choice.Hide()
 
         # Save Button
 
         save_button = wx.Button(panel, label="Save Changes")
         save_button.Bind(wx.EVT_BUTTON, save_data)
-        sizer.Add(save_button, 0, wx.ALL, 10)
+        sizer.Add(save_button, 0, wx.ALL | wx.ALIGN_RIGHT, 10)
 
         panel.SetSizer(sizer)
-        panel.Centre()
-        panel.Fit()
+        panel.SetMinSize(panel.FromDIP(wx.Size(320, 300)))
+        panel.SetClientSize(panel.FromDIP(wx.Size(360, 340)))
+        panel.CentreOnParent()
+        _clamp_window_to_display(panel)
         panel.Show()
 
     def edit_fireworks_data(self, _self):
-        # self.onclick_get_set_tag_data()
         title = _self.Parent.Parent.GetTitle()
         # Determine the slot number, ensuring it is valid
 
@@ -2667,7 +5537,7 @@ class ItemTools:
         firework_data = current_nbt
 
         frame = wx.Frame(_self, title="Edit Fireworks Explosions", size=(600, 400),
-                         style=wx.DEFAULT_FRAME_STYLE | wx.STAY_ON_TOP)
+                         style=_float_on_parent_style())
         frame.Freeze()
 
         scroll_panel = wx.ScrolledWindow(frame, style=wx.VSCROLL)
@@ -2812,7 +5682,6 @@ class ItemTools:
 
 
             current_nbt['tag'] = firework_tag
-            # nbt = self.editor.selected_player[self.editor.keys]
             _self.editor.selected_player.save_player()
             frame.Close()
         # Buttons
@@ -2926,7 +5795,6 @@ class ItemTools:
             _self.editor.selected_player.save_player()
 
         # Initial setup and main UI creation
-        # self.onclick_get_set_tag_data()
 
         title = _self.Parent.Parent.GetTitle()
         # Determine the slot number, ensuring it is valid
@@ -2943,7 +5811,7 @@ class ItemTools:
 
         current_nbt = current_nbt[slot]
         item_type = get_item_type(current_nbt['Name'].py_str.split(':')[1])
-        panel = Frame(_self, title="Edit Enchants", style=wx.DEFAULT_FRAME_STYLE | wx.STAY_ON_TOP)
+        panel = Frame(_self, title="Edit Enchants", style=_float_on_parent_style())
         panel.SetBackgroundColour(BLACK)
         main_sizer = BoxSizer(VERTICAL)
         enchant_checkboxes = {}
@@ -3042,7 +5910,7 @@ class ItemTools:
 
         namespace = "minecraft:"
 
-        # … inside your method, after computing `tag_data`, `slot`, `last_key`, `editor`, etc.
+        # Inspect the container entry after resolving the slot and parent data.
 
         for keyword, (list_key, title) in CONTAINERS.items():
 
@@ -3059,7 +5927,8 @@ class ItemTools:
                 tag = parent_nbt["tag"]
 
                 # Finally, open the editor
-                InventoryEditor(self, self.editor.selected_player, keys, title=title)
+                container_editor = InventoryEditor(editor, editor.selected_player, keys, title=title)
+                container_editor.Raise()
                 break
 
     def edit_name_lore(self, event, _self):
@@ -3090,7 +5959,35 @@ class IconButton(wx.Panel):
         self.drag_image = None
         self.dragging = False
         self.tools = ItemTools(parent)
-        self.font = wx.Font(18, wx.FONTFAMILY_ROMAN, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD)
+        self._compact_ui = bool(getattr(editor, "_inventory_family_ui", False))
+        self._main_inventory_ui = bool(getattr(editor, "_main_inventory_ui", False))
+        if self._compact_ui:
+            if self._main_inventory_ui:
+                # Preserve endpoint geometry and leave space for inventory
+                # artwork at the calibrated 1440p / 150% setting.
+                slot_edge = (92 if _ui_is_1440p_150(editor)
+                             else _ui_metric_three(editor, 76, 104, 154))
+                slot_font = _ui_metric(editor, 12, 14)
+            else:
+                # Only the Ender Chest shares the 1440p / 150% slot calibration;
+                # other containers use the normal scaling curve.
+                slot_edge = (92 if ("Ender" in editor.GetTitle() and
+                                    _ui_is_1440p_150(editor))
+                             else _ui_metric_three(editor, 76, 104, 154))
+                slot_font = _ui_metric(editor, 12, 14)
+            self._button_size = (slot_edge, slot_edge)
+        else:
+            slot_font = 18
+            self._button_size = (80, 80)
+        # The item atlas retains its normal 64 px Windows path at all other
+        # display settings and in other container windows.
+        target_inventory_ui = self._main_inventory_ui or (
+            self._compact_ui and "Ender" in editor.GetTitle()
+        )
+        self._bitmap_size = (
+            76 if target_inventory_ui and _ui_is_1440p_150(editor) else None
+        )
+        self.font = wx.Font(slot_font, wx.FONTFAMILY_ROMAN, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD)
         self.SetFont(self.font)
         self.parent = parent
         self.last_key = ''
@@ -3103,65 +6000,141 @@ class IconButton(wx.Panel):
         self.slot = slot
         self.editor = editor
         self.sizer = wx.BoxSizer(wx.VERTICAL)
-        self.current_submenu_index = 0  # Add the attribute here
-        self.items_per_page = 0  # Example number, can be modified
-        # self.menu_handler = ContextMenuHandler(self, self.editor)
         self.setup_load_check_button_or_text()
-        # Input box for count
-        self.count_box = wx.TextCtrl(self, value=str(self.count), size=(40, 30), style=wx.TE_PROCESS_ENTER)
+        # Let wx determine the count field height so text remains centered
+        # at different DPI settings; only its width needs explicit sizing.
+        if self._compact_ui:
+            if self._main_inventory_ui:
+                count_width = _ui_metric(editor, 60, 82)
+            else:
+                count_width = _ui_metric(editor, 60, 82)
+            count_size = (count_width, -1)
+            count_style = wx.TE_PROCESS_ENTER | wx.TE_CENTRE
+        else:
+            count_size = (40, 30)
+            count_style = wx.TE_PROCESS_ENTER
+        self.count_box = wx.TextCtrl(
+            self, value=str(self.count), size=count_size, style=count_style
+        )
+        if self._compact_ui:
+            # Do not depend on Amulet/Windows issuing a hover or selection repaint
+            # before these native controls obtain their dark colours.
+            self.SetBackgroundColour(wx.Colour(0, 0, 0))
+            self.button.SetBackgroundColour(wx.Colour(46, 46, 46))
+            self.button.SetForegroundColour(wx.Colour(255, 255, 255))
+            self.count_box.SetBackgroundColour(wx.Colour(0, 0, 0))
+            self.count_box.SetForegroundColour(wx.Colour(255, 255, 255))
         self.count_box.Bind(wx.EVT_TEXT_ENTER, self.OnTextChange)
         self.Bind(wx.EVT_KEY_UP, self.on_key_up)
         self.sizer.Add(self.button, 0, wx.CENTER)
-        self.sizer.Add(self.count_box, 0, wx.CENTER | wx.TOP, 2)
+        self.sizer.Add(self.count_box, 0, wx.CENTER | wx.TOP, _ui_metric(editor, 4, 6) if self._compact_ui else 5)
         self.panel_leave = False
         self.SetSizer(self.sizer)
+        self._drag_tick_timer = None
+        self._drag_epoch = 0
+        self._drag_moved = False
+        self._drag_touched_slots = set()
+        # Capture on the editor's scroll panel rather than an item button.
+        # This keeps native button painting independent of drag movement.
+        self._drag_capture_window = None
+        self.Bind(wx.EVT_WINDOW_DESTROY, self._on_drag_destroy)
+
+    def _finish_drag_visual(self):
+        """End the source-owned native drag exactly once, including its timer."""
+        timer = getattr(self, '_drag_tick_timer', None)
+        self._drag_tick_timer = None
+        self._drag_epoch = getattr(self, '_drag_epoch', 0) + 1
+        if timer is not None:
+            timer.Stop()
+        # Leave the scroll panel's permanent event bindings in place. Only
+        # clear ownership here; no Bind/Unbind while wx dispatches mouse-up.
+        self._drag_capture_window = None
+        if getattr(self.editor, '_inventory_drag_source', None) is self:
+            self.editor._inventory_drag_source = None
+        drag = self.drag_image
+        self.drag_image = None
+        self.dragging = False
+        self.is_mouse_down = False
+        if drag is not None:
+            try:
+                drag.Hide()
+            except Exception as exc:
+                print(f'Inventory drag-image Hide failed: {exc}')
+            try:
+                # EndDrag releases the capture originally acquired by BeginDrag.
+                drag.EndDrag()
+            except Exception as exc:
+                print(f'Inventory drag-image EndDrag failed: {exc}')
+        try:
+            self.button.Refresh()
+        except (RuntimeError, AttributeError):
+            pass
+        if drag is not None:
+            # The native drag captures the mouse, so some buttons may have
+            # missed their normal leave notification. Refresh after EndDrag.
+            slots = tuple(getattr(self, '_drag_touched_slots', ()))
+            self._drag_touched_slots = set()
+            wx.CallAfter(self._restore_drag_slot_visuals, slots)
+
+    def _restore_drag_slot_visuals(self, slots):
+        """Reset native hover/focus states only for slots touched by a drag."""
+        for slot in slots:
+            try:
+                slot._restore_slot_after_popup(slot.button)
+            except (RuntimeError, AttributeError):
+                # The editor may have rebuilt or closed a slot before CallAfter.
+                pass
+
+    def _restore_slot_after_popup(self, button):
+        """Remove stale native button hover/focus state after menus or drags."""
+        try:
+            if not button or not button.IsShownOnScreen():
+                return
+            if button.GetScreenRect().Contains(wx.GetMousePosition()):
+                return  # Cursor truly hovers over this slot: leave it highlighted.
+            if button.HasFocus():
+                self.editor.scroll_panel.SetFocus()
+            if sys.platform == "win32":
+                # Native MSW buttons can retain hover after a menu or a drag.
+                # Send WM_MOUSELEAVE only when the cursor is really outside.
+                ctypes.windll.user32.SendMessageW(
+                    ctypes.c_void_p(int(button.GetHandle())), 0x02A3, 0, 0
+                )
+            button.Refresh()
+        except (RuntimeError, AttributeError):
+            pass  # A popup action may already have replaced/destroyed this slot.
 
     def on_hover_leave(self, event):
         self.panel_leave = True
+        source = CLIP_BOARD.get('SOURCE_SELF')
+        if source is not None and source.drag_image is not None:
+            source._drag_touched_slots.add(self)
+        # Do not call ReleaseMouse here. BeginDrag owns capture until EndDrag;
+        # wxWidgets' capture stack can already be empty on an unrelated slot.
+        # Hover transitions do not create an independent mouse capture.
         try:
-            if hasattr(self, "button") and self.button:
-                try:
-                    if self.button.HasCapture():
-                        self.button.ReleaseMouse()
-                except Exception:
-                    pass
-                try:
-                    self.parent.SetFocus()
-                except Exception:
-                    pass
-                self.button.Refresh()
-                self.button.Update()
-        except Exception:
+            self.button.Refresh()
+            self.Refresh()
+        except (RuntimeError, AttributeError):
             pass
-        self.Refresh()
-        self.Update()
         event.Skip()
 
     def on_hover_enter(self, event):
         self.panel_leave = False
-
+        source = CLIP_BOARD.get('SOURCE_SELF')
+        if source is not None and source.drag_image is not None:
+            source._drag_touched_slots.add(self)
         if CLIP_BOARD.get('SLOT_SOURCE'):
             key, slot_number = self.Get_slot_map_key()
-            keys = self.editor.keys + [key]
-            _ = self.editor.selected_player[keys]
-
             CLIP_BOARD['SLOT_TARGET'] = (key, slot_number)
-          #  print(key, slot_number, 'HOVER', CLIP_BOARD['SLOT_SOURCE'])
-
-            if CLIP_BOARD.get('COPY'):
-                self.complete_drag(event)
-                event.Skip()
-                return
+            # Entering a slot is not a drop. Commit only after button release.
 
         drag_id = DRAG_DATA_SOURCE.get('id')
         if drag_id:
             ctrl_down = wx.GetKeyState(wx.WXK_CONTROL)
-            _shift_down = wx.GetKeyState(wx.WXK_SHIFT)
             self.on_menu_item_selected(event, drag_id)
-
             if not ctrl_down:
                 DRAG_DATA_SOURCE.pop('id', None)
-
         event.Skip()
 
     def complete_drag(self, event):
@@ -3173,7 +6146,8 @@ class IconButton(wx.Panel):
 
         source_data = CLIP_BOARD.get('SLOT_SOURCE')
         if source_data is None:
-            return
+
+            return False
 
         source_key, source_slot = source_data
         source_editor_keys = CLIP_BOARD.get('NESTED_KEYS')
@@ -3185,33 +6159,47 @@ class IconButton(wx.Panel):
         test_target = self.editor.keys + [target_key, target_slot]
         if test_target[:len(test_source)] == test_source:
 
-            CLIP_BOARD.pop('COPY')
-            self.dragging = False
-            return  # invalid move
+            CLIP_BOARD.pop('COPY', None)
+            source_control = CLIP_BOARD.get('SOURCE_SELF')
+            if source_control is not None:
+                source_control._finish_drag_visual()
+
+            return False  # invalid move
         self._target_title = self.Parent.Parent.GetTitle()
         self._source_title = CLIP_BOARD['SOURCE_SELF'].Parent.Parent.GetTitle()
         if not CLIP_BOARD.get('COPY'):
 
-            return
+            return False
 
         source_slot_data = CLIP_BOARD.get('SLOT_SOURCE')
         if not source_slot_data:
-            return
+
+            return False
 
 
         source_key, source_slot = source_slot_data
         source_button = CLIP_BOARD['SOURCE_SELF'].editor.slot_map.get(source_slot_data)
         if not source_button:
-            return
-        if not source_button.button.GetBitmap().IsOk():
-            return
-        self._tar_empty = True
 
+            return False
+        if not source_button.button.GetBitmap().IsOk():
+
+            return False
+        source_list = self.editor.selected_player[source_path]
+        target_list = self.editor.selected_player[target_path]
+        source_index = _inventory_item_index(source_list, source_slot, source_path)
+        target_index = _inventory_item_index(target_list, target_slot, target_path)
+        if source_index is None:
+            return False
 
         count_source = CLIP_BOARD['SOURCE_SELF'].GetValue()
         count_target = self.GetValue()
-        if count_target.py_int > 0:
-            self._tar_empty = False
+        self._tar_empty = count_target.py_int <= 0
+        if not self._tar_empty and target_index is None:
+            return False
+        if self._tar_empty and target_index is None and (
+                len(target_path) == 1 and target_key in ('Armor', 'Offhand')):
+            return False
 
         self.SetValue(count_source)
         CLIP_BOARD['SOURCE_SELF'].SetValue(count_target)
@@ -3224,7 +6212,8 @@ class IconButton(wx.Panel):
         target_tip = button_tooltip_target.GetTip()
         button_name_target = self.button.GetName()
         if not button_icon_source.IsOk():
-            return
+
+            return False
         if button_icon_target.IsOk():
             source_button.button.SetBitmap(button_icon_target)
             source_button.button.SetToolTip(target_tip)
@@ -3243,8 +6232,6 @@ class IconButton(wx.Panel):
 
 
 
-        source_list = self.editor.selected_player[source_path]
-        target_list = self.editor.selected_player[target_path]
         source_list_key = key_from_title(self._source_title)
         target_list_key = key_from_title(self._target_title)
 
@@ -3269,23 +6256,6 @@ class IconButton(wx.Panel):
             target_static = True
         elif self._target_title in [t[1] for t in CONTAINERS.values()][1:]:
             target_static = False
-
-        source_index = next(
-            (i for i, item in enumerate(source_list)
-             if item.get('Slot', IntTag(-99)).py_int == source_slot),
-            None
-        )
-        target_index = next(
-            (i for i, item in enumerate(target_list)
-             if item.get('Slot', IntTag(-99)).py_int == target_slot),
-            None
-        )
-
-        # Safety check
-        if source_index is None:
-            return# raise ValueError(f"Source slot {source_slot} not found")
-        # if target_index is None and target_static:
-            # raise ValueError(f"Target slot {target_slot} not found in static list")
 
         # Perform MOVE or SWAP
         # Get source and target NBT compounds
@@ -3346,13 +6316,10 @@ class IconButton(wx.Panel):
             if self._tar_empty:
                 # Move: target was empty
 
-                if target_static:
-                    copy_nbt_item_fields(source_list[source_index], target_list[target_index], target_slot)
-                else:
-                    if not target_list or not target_index:
-                        target_list.append(CompoundTag({}))
-                        target_index = -1
-                    copy_nbt_item_fields(source_list[source_index], target_list[target_index], target_slot)
+                if target_index is None:
+                    target_list.append(CompoundTag({}))
+                    target_index = len(target_list) - 1
+                copy_nbt_item_fields(source_list[source_index], target_list[target_index], target_slot)
 
                 # Remove source if needed
                 if source_static:
@@ -3369,17 +6336,18 @@ class IconButton(wx.Panel):
                     copy_nbt_item_fields(target_list[target_index], source_list[source_index], source_slot)
                     copy_nbt_item_fields(temp, target_list[target_index], target_slot)
                 else:
-                    if not target_list:
-                        target_list.append(CompoundTag({}))
-                        target_index = -1
-
                     copy_nbt_item_fields(target_list[target_index], source_list[source_index], source_slot)
                     copy_nbt_item_fields(temp, target_list[target_index], target_slot)
 
 
-        # Clear clipboard and refresh
+        # The destination hover can complete before the source receives mouse-up.
+        # Release its native drag image/capture now or it can remain on-screen.
+        source_control = CLIP_BOARD.get('SOURCE_SELF')
+        if source_control is not None:
+            source_control._finish_drag_visual()
         CLIP_BOARD.clear()
         self.Refresh()
+        return True
     def copy_tag_and_slot(self, event):
 
         key, slot_number = self.Get_slot_map_key()
@@ -3402,94 +6370,156 @@ class IconButton(wx.Panel):
                     break
 
         # If nothing matched, don't copy anything
-        # CLIP_BOARD['COPY'] = None
     def OnMouseMove(self, event):
-
-
-        # if self.is_mouse_down and event.Dragging() and event.LeftIsDown():
-        #     if not self.dragging:
-        #         self.StartDrag(event)
-
-
-
-        if (
-                hasattr(self, "dragging")
-                and self.drag_image is not None
-                and isinstance(self.drag_image, wx.DragImage)
-                and event.Dragging()
-                and event.LeftIsDown()
-        ):
-            pos = event.GetPosition()
-
-            self.drag_image.Move(pos)
-    def OnMouseDown(self, event):
-        self.drag_start_pos = event.GetPosition()
-        self.is_mouse_down = True
+        if self.drag_image is not None and event.Dragging() and event.LeftIsDown():
+            self._track_drag_pointer()
         event.Skip()
 
-        """Handles mouse down event to start the copy or delete logic."""
-        pos = event.GetPosition()
-        screen_pos = event.GetEventObject().ClientToScreen(pos)
-        button = event.GetEventObject()
-        image = button.GetBitmap()
+    def _on_drag_parent_motion(self, event):
+        # The drag image now captures the editor surface, not the button.
+        if self.drag_image is not None and wx.GetMouseState().LeftIsDown():
+            self._track_drag_pointer()
+        event.Skip()
+
+    def _on_drag_parent_left_up(self, event):
+        # Route releases to the original click/drag logic even across slots.
+        if self.drag_image is not None:
+            self.on_left_click(event)
+        else:
+            event.Skip()
+
+    def _on_drag_parent_capture_lost(self, event):
+        # If Windows revokes mouse capture, cancel rather than commit.
+        if self.drag_image is not None:
+            wx.CallAfter(self._cancel_lost_drag_capture)
+        # Do not Skip: wx requires us to handle mouse-capture loss.
+
+    def _cancel_lost_drag_capture(self):
+        if self.drag_image is not None:
+            self._finish_drag_visual()
+            if CLIP_BOARD.get('SOURCE_SELF') is self:
+                CLIP_BOARD.clear()
+
+    def OnMouseDown(self, event):
+        self.drag_start_pos = event.GetPosition()
+        self._drag_origin_screen = wx.GetMousePosition()
+        self._drag_moved = False
+        self.is_mouse_down = True
+
+        image = event.GetEventObject().GetBitmap()
         if not image or not image.IsOk():
+            event.Skip()
             return
-        bedrock_id = button.GetName()
 
-        # Store drag data
-        CLIP_BOARD['id'] = bedrock_id
-
-        self.dragged_index = bedrock_id
-        self.dragged_id = bedrock_id
-        self.drag_image = wx.DragImage(image)
-        self.drag_image.BeginDrag((30, 30), self.button, fullScreen=True)
-        self.drag_image.Move(screen_pos)
-        self.drag_image.Show()
-        self.copy_tag_and_slot(event)
-        self.dragging = True
-
-        # Simulate getting the index (assuming list_ctrl or similar control)
-        # In this case, we don't need it because the image is directly related to the button.
-
-        # If there's no image or metadata set on the button, we don't proceed
-
-        # Get the image and associated metadata from the button
-        # image = self.button.GetBitmap()
-    def StartDrag(self, event):
-        mouse_state = wx.GetMouseState()
-        if not mouse_state.LeftIsDown():
-
-            return
-        pos = event.GetPosition()
-        button = event.GetEventObject()
-        image = button.GetBitmap()
-        if not image or not image.IsOk():
-            return
-        bedrock_id = button.GetName()
-
-        CLIP_BOARD['id'] = bedrock_id
-
-        self.dragged_index = bedrock_id
-        self.dragged_id = bedrock_id
+        # A previous drag can lose its mouse-up; end it before starting a new
+        # Windows image-list drag. Otherwise ImageList_BeginDrag can assert.
+        previous = CLIP_BOARD.get('SOURCE_SELF')
+        if previous is not None:
+            previous._finish_drag_visual()
+            CLIP_BOARD.clear()
+        candidate = wx.DragImage(image)
+        capture_window = self.editor.scroll_panel
         try:
+            started = candidate.BeginDrag((30, 30), capture_window, fullScreen=True)
+        except wx.wxAssertionError as exc:
+            print(f'Inventory drag preview unavailable: {exc}')
+            started = False
+        if not started:
+            self.is_mouse_down = False
+            event.Skip()
+            return
 
-
-            # Convert to screen coordinates
-            screen_pos = event.GetEventObject().ClientToScreen(pos)
-            self.drag_image = wx.DragImage(image)
-            self.drag_image.BeginDrag((0, 0), button, fullScreen=True)
-            self.drag_image.Move(screen_pos)
-            self.drag_image.Show()
+        self.drag_image = candidate
+        self.dragging = True
+        self._drag_touched_slots = {self}
+        self._drag_capture_window = capture_window
+        self.editor._inventory_drag_source = self
+        self.dragged_id = event.GetEventObject().GetName()
+        self.dragged_index = self.dragged_id
+        CLIP_BOARD['id'] = self.dragged_id
+        try:
+            candidate.Move(capture_window.ScreenToClient(wx.GetMousePosition()))
+            candidate.Show()
             self.copy_tag_and_slot(event)
-            self.dragging = True
-        except:
-            # print('some error was ignored')
-            pass
+            self._drag_epoch = getattr(self, '_drag_epoch', 0) + 1
+            epoch = self._drag_epoch
+            self._drag_tick_timer = wx.CallLater(50, self._poll_inventory_drag, epoch)
+        except Exception:
+            self._finish_drag_visual()
+            if CLIP_BOARD.get('SOURCE_SELF') is self:
+                CLIP_BOARD.clear()
+            raise
+    def _track_drag_pointer(self):
+        if self.drag_image is None:
+            return
+        point = wx.GetMousePosition()
+        origin = getattr(self, '_drag_origin_screen', point)
+        if abs(point.x - origin.x) >= 5 or abs(point.y - origin.y) >= 5:
+            self._drag_moved = True
+        # wx.DragImage.Move expects coordinates relative to BeginDrag's owner.
+        owner = getattr(self, '_drag_capture_window', None) or self.button
+        self.drag_image.Move(owner.ScreenToClient(point))
+
+    def _poll_inventory_drag(self, epoch):
+        # The source may not receive mouse-up because another child control is
+        # under the pointer. A source-owned timer observes physical release.
+        self._drag_tick_timer = None
+        if epoch != getattr(self, '_drag_epoch', None) or self.drag_image is None:
+            return
+        try:
+            if not wx.GetMouseState().LeftIsDown():
+                self._release_inventory_drag()
+                return
+            self._track_drag_pointer()
+            self._drag_tick_timer = wx.CallLater(50, self._poll_inventory_drag, epoch)
+        except (RuntimeError, AttributeError) as exc:
+            # Controls may be destroyed when closing or rebuilding an editor.
+            print(f'Inventory drag canceled after control destruction: {exc}')
+            self._finish_drag_visual()
+            if CLIP_BOARD.get('SOURCE_SELF') is self:
+                CLIP_BOARD.clear()
+        except Exception:
+            import traceback
+            print('Inventory drag polling error:')
+            traceback.print_exc()
+            self._finish_drag_visual()
+            if CLIP_BOARD.get('SOURCE_SELF') is self:
+                CLIP_BOARD.clear()
+
+    def _release_inventory_drag(self):
+        """End preview, then commit a single validated release-point transfer."""
+        if CLIP_BOARD.get('SOURCE_SELF') is not self or self.drag_image is None:
+            self._finish_drag_visual()
+            return
+        point = wx.GetMousePosition()
+        destination = _inventory_drop_slot_at(point, self)
+        moved = bool(getattr(self, '_drag_moved', False))
+        if destination is not None:
+            self._drag_touched_slots.add(destination)
+        self._finish_drag_visual()
+        try:
+            if moved and destination is not None and destination is not self:
+                # complete_drag validates NBT before updating the controls.
+                destination.complete_drag(None)
+        except Exception:
+            import traceback
+            print('Inventory drop failed:')
+            traceback.print_exc()
+        finally:
+            if CLIP_BOARD.get('SOURCE_SELF') is self:
+                CLIP_BOARD.clear()
+
+    def _on_drag_destroy(self, event):
+        if event.GetEventObject() is self:
+            if getattr(self, 'drag_image', None) is not None:
+                self._finish_drag_visual()
+            if CLIP_BOARD.get('SOURCE_SELF') is self:
+                CLIP_BOARD.clear()
+        event.Skip()
+
     def on_doubble_click(self, event):
         item_name = self.button.GetName()
-        self.dragging = False
-        self.drag_image.Hide()
-        self.drag_image.EndDrag()
+        self._finish_drag_visual()
 
         if any(key in item_name for key in CONTAINERS.keys()):
             ItemTools.open_container(
@@ -3502,7 +6532,6 @@ class IconButton(wx.Panel):
 
         # Get and validate button
         button = event.GetEventObject()
-        # self.onclick_get_set_tag_data()
 
         menu = wx.Menu()
 
@@ -3517,7 +6546,6 @@ class IconButton(wx.Panel):
             last_data = self.editor.selected_player[keys]
             menu_copy = wx.MenuItem(menu, wx.ID_ANY, "Copy")
             menu.Append(menu_copy)
-            # self.Bind(wx.EVT_MENU, lambda e, idx=wx.ID_ANY: self.tools.copy_tag( e), menu_copy)
             self.Bind(wx.EVT_MENU, lambda e, btn=self: self.tools.copy_tag(btn), menu_copy)
             if last_data and last_data.get('tag', CompoundTag({})).get('minecraft:keep_on_death', False):
                 self.text_to_keep = 'Drop item after death'
@@ -3595,49 +6623,40 @@ class IconButton(wx.Panel):
         # Adjust values here (try -5, -10 etc. until it's perfectly aligned)
         adjusted_pos = wx.Point(client_pos.x + 10, client_pos.y + 10)
 
-        self.PopupMenu(menu, adjusted_pos)
-        menu.Destroy()
+        try:
+            self.PopupMenu(menu, adjusted_pos)
+        finally:
+            menu.Destroy()
+            wx.CallAfter(self._restore_slot_after_popup, button)
     def on_left_click(self, event):
-        self.is_mouse_down = False
-        self.dragging = False
+        # A source can lose its left-up to another slot. Whichever slot gets
+        # the release uses the same source-owned finalizer as the timer.
+        had_local_mouse_down = bool(self.is_mouse_down)
         event.Skip()
-
-         # Finalize move or swap
-        if getattr(self, "drag_image", None):
-            self.drag_image.Hide()
-            try:
-                self.drag_image.EndDrag()
-            except Exception:
-                pass
-            finally:
-                self.drag_image = None
-
-        if self.dragging:
-
-            try:
-                self.ReleaseMouse()
-            except Exception:
-                pass
-
+        source = CLIP_BOARD.get('SOURCE_SELF')
+        if source is not None and source.drag_image is not None:
+            source._track_drag_pointer()
+            moved = bool(getattr(source, '_drag_moved', False))
+            if moved or source is not self:
+                source._release_inventory_drag()
+                return
+            # An ordinary click, with no pointer movement, still opens menu.
+            source._finish_drag_visual()
+            CLIP_BOARD.clear()
+        elif not had_local_mouse_down:
+            return
+        self.is_mouse_down = False
         self.dragged_bitmap = None
         self.dragged_id = None
-        self.button = event.GetEventObject()
         if self.panel_leave:
             return
         self.button.SetFocus()
-
-        if isinstance(self.button, wx.Button):
-
-            if self.button.GetName() != 'Save':
-                self.handle_button_click(self.button)
-            else:
-                return
-        else:
-            return  # Ignore clicks not on our custom buttons
+        if isinstance(self.button, wx.Button) and self.button.GetName() != 'Save':
+            self.handle_button_click(self.button)
     def setup_load_check_button_or_text(self):
 
         if self.bedrock_id and not self.icon_bitmap:
-            self.button = wx.Button(self, size=(80, 80), label=bedrock_id)
+            self.button = wx.Button(self, size=self._button_size, label=bedrock_id)
             font = self.button.GetFont()
             font.SetPointSize(10)  # Make text smaller
             self.button.SetFont(font)
@@ -3650,13 +6669,10 @@ class IconButton(wx.Panel):
             self.button.SetLabel(bedrock_id)
         else:
             if self.bedrock_id:
-                self.button = wx.Button(self, size=(80, 80) ,name=self.bedrock_id)
+                self.button = wx.Button(self, size=self._button_size, name=self.bedrock_id)
 
-                # self.button.Bind(wx.EVT_LIST_BEGIN_DRAG, self.OnBeginDrag)
-                # self.button.Bind(wx.EVT_LEFT_DOWN, self.OnStartDrag)
-                # self.button.Bind(wx.EVT_MOTION, self.OnDragMotion)
             else:
-                self.button = wx.Button(self, size=(80, 80), name="Empty")
+                self.button = wx.Button(self, size=self._button_size, name="Empty")
         try:
             valid_bitmap = bool(self.icon_bitmap and self.icon_bitmap.IsOk())
         except Exception as e:
@@ -3664,7 +6680,15 @@ class IconButton(wx.Panel):
             valid_bitmap = False
 
         if valid_bitmap:
-            self.button.SetBitmap(wx.Bitmap(self.icon_bitmap))
+            if self._compact_ui and self.bedrock_id:
+                bitmap = self.editor.resources.get_dpi_bitmap(
+                    self.bedrock_id, self, logical_size=self._bitmap_size or 64
+                )
+                if not bitmap or not bitmap.IsOk():
+                    bitmap = wx.Bitmap(self.icon_bitmap)
+            else:
+                bitmap = wx.Bitmap(self.icon_bitmap)
+            self.button.SetBitmap(bitmap)
 
         else:
             self.button.SetBitmap(wx.NullBitmap)
@@ -3692,7 +6716,6 @@ class IconButton(wx.Panel):
             return
 
         self.total_items = []  # Reset for this click
-        # self.onclick_get_set_tag_data()  # Assuming you have this method
 
         key, slot = self.Get_slot_map_key()
         # Generate the menu
@@ -3728,8 +6751,11 @@ class IconButton(wx.Panel):
         screen_pos = wx.GetMousePosition()
         client_pos = self.ScreenToClient(screen_pos)
         adjusted_pos = wx.Point(client_pos.x + 10, client_pos.y + 10)
-        self.PopupMenu(menu, adjusted_pos)
-        menu.Destroy()
+        try:
+            self.PopupMenu(menu, adjusted_pos)
+        finally:
+            menu.Destroy()
+            wx.CallAfter(self._restore_slot_after_popup, self.button)
 
     def SetName(self, name):
         self.button.SetName(name)
@@ -3842,65 +6868,226 @@ class IconButton(wx.Panel):
         self.SetBitmap(icon[0], display_name)
         self.Refresh()
 
-    def add_category_menus(self, parent_menu):
-        """Add organized category menus from a single dictionary."""
-        for group_name, group_data in categories.items():
-            group_menu = wx.Menu()
-            parent_menu.AppendSubMenu(group_menu, group_name)
+    def _runtime_categories(self):
+        """Return an isolated copy of the stable slot-menu taxonomy."""
+        return {
+            group_name: {subgroup: list(item_names) for subgroup, item_names in group_data.items()}
+            for group_name, group_data in SLOT_MENU_CATEGORIES.items()
+        }
 
-            # If group_data is a dict of subgroups...
+    def _resolve_menu_refs(self, id_ranges):
+        """Resolve stable item IDs while retaining legacy numeric compatibility."""
+        expanded_refs = []
+        for item in id_ranges:
+            if (
+                isinstance(item, tuple)
+                and len(item) == 2
+                and all(isinstance(value, int) for value in item)
+            ):
+                expanded_refs.extend(range(item[0], item[1] + 1))
+            else:
+                expanded_refs.append(item)
+
+        item_names = []
+        seen = set()
+        for item_ref in expanded_refs:
+            if isinstance(item_ref, str):
+                item_name = item_ref
+                if item_name not in self.editor.resources.data:
+                    continue
+            elif isinstance(item_ref, int):
+                if not (0 <= item_ref < len(self.editor.resources.get_items_id)):
+                    continue
+                item_name = self.editor.resources.get_items_id[item_ref]
+            else:
+                continue
+            if item_name in seen:
+                continue
+            seen.add(item_name)
+            item_names.append(item_name)
+        return item_names
+
+    def _menu_group_index(self, subgroup, item_name):
+        """Return the stable type/material group used before alphabetizing."""
+        shape_groups = {'Walls', 'Fences', 'Fence_Gates', 'Stairs', 'Slabs', 'Doors', 'Trapdoors'}
+        if subgroup in shape_groups:
+            # Keep the same broad material families together inside large shape
+            # menus, then alphabetize the names inside each family.
+            if (
+                item_name.startswith(MENU_WOOD_PREFIXES)
+                or item_name in {'fence', 'fence_gate', 'trapdoor'}
+            ):
+                return 0
+            if 'concrete' in item_name:
+                return 2
+            if 'wool' in item_name:
+                return 3
+            if 'copper' in item_name or item_name.startswith('iron_'):
+                return 4
+            return 1
+
+        if subgroup == 'Logs':
+            is_log_shape = item_name.endswith(('_log', '_stem', '_hyphae'))
+            if is_log_shape:
+                return 1 if item_name.startswith('stripped_') else 0
+            return 2
+
+        if subgroup == 'Tools':
+            for index, suffix in enumerate(('_axe', '_pickaxe', '_shovel', '_hoe')):
+                if item_name.endswith(suffix):
+                    return index
+            return 4
+
+        if subgroup == 'Player_Armor':
+            for index, suffix in enumerate(('_helmet', '_chestplate', '_leggings', '_boots')):
+                if item_name.endswith(suffix):
+                    return index
+            return 4
+
+        if subgroup == 'Boats':
+            return 1 if 'chest_' in item_name else 0
+
+        if subgroup == 'Potions':
+            if item_name.startswith('splash_potion'):
+                return 1
+            if item_name.startswith('lingering_potion'):
+                return 2
+            return 0
+
+        if subgroup == 'Redstone_Components':
+            if 'rail' in item_name or 'minecart' in item_name:
+                return 0
+            if item_name in {'redstone_torch', 'lever'}:
+                return 1
+            if item_name.endswith('_button'):
+                return 2
+            if item_name.endswith('_pressure_plate'):
+                return 3
+            return 4
+
+        if subgroup == 'Chests':
+            return 1 if 'minecart' in item_name else 0
+
+        if subgroup == 'Beds':
+            if item_name == 'bed' or item_name.startswith('bed:') or item_name.endswith('_bed'):
+                return 0
+            return 1
+
+        if subgroup == 'Animal_Products':
+            if item_name.endswith('_spawn_egg'):
+                return 1
+            if item_name.endswith('_egg'):
+                return 0
+            return 2
+
+        if subgroup == 'Crops':
+            return 0 if item_name.endswith('_seeds') else 1
+
+        return 0
+
+    def _menu_sort_key(self, subgroup, item_name):
+        display_name = self.editor.resources.data.get(item_name, {}).get(
+            'display_name', item_name
+        )
+        display_key = display_name.casefold()
+        variant_match = re.match(r"^(.*?):(\d+)$", display_key)
+        if variant_match:
+            display_base = variant_match.group(1)
+            display_variant = int(variant_match.group(2))
+        else:
+            display_base = display_key
+            display_variant = -1
+        return (
+            self._menu_group_index(subgroup, item_name),
+            display_base,
+            display_variant,
+            item_name.casefold(),
+        )
+
+    def add_category_menus(self, parent_menu):
+        """Add the stable, type-organized Inventory Editor slot menu."""
+        for group_name, group_data in self._runtime_categories().items():
+            group_menu = wx.Menu()
+            display_group = group_name.replace('_', ' ').replace('&', '&&')
+            parent_menu.AppendSubMenu(group_menu, display_group)
+
             if isinstance(group_data, dict):
-                # If it has exactly one subgroup and that subgroup is a list/tuple,
-                # collapse it into a single-level menu
                 if len(group_data) == 1:
-                    _, id_ranges = next(iter(group_data.items()))
-                    self._populate_menu_with_ranges(group_menu, id_ranges)
+                    category_name, id_ranges = next(iter(group_data.items()))
+                    self._populate_menu_with_ranges(group_menu, id_ranges, category_name)
                 else:
-                    # Multiple subgroups: make a submenu for each
                     for category_name, id_ranges in group_data.items():
                         sub_menu = wx.Menu()
-                        group_menu.AppendSubMenu(sub_menu, category_name)
-                        self._populate_menu_with_ranges(sub_menu, id_ranges)
-
-            # If group_data is a flat list/tuple of ranges or IDs...
+                        display_category = category_name.replace('_', ' ')
+                        # Avoid awkward repeated group/subgroup labels.
+                        if display_category == group_name.replace('_', ' '):
+                            display_category = 'Other'
+                        # wx.Menu treats a single ampersand as a mnemonic marker.
+                        display_category = display_category.replace('&', '&&')
+                        group_menu.AppendSubMenu(sub_menu, display_category)
+                        self._populate_menu_with_ranges(sub_menu, id_ranges, category_name)
             elif isinstance(group_data, (list, tuple)):
-                self._populate_menu_with_ranges(group_menu, group_data)
-
+                self._populate_menu_with_ranges(group_menu, group_data, group_name)
             else:
                 print(f"Skipping {group_name}: unsupported type {type(group_data)}")
 
-    def _populate_menu_with_ranges(self, menu, id_ranges):
-        """Helper to expand ranges/IDs and add items to a menu."""
-        expanded_ids = []
-        for item in id_ranges:
-            if isinstance(item, tuple):
-                expanded_ids.extend(range(item[0], item[1] + 1))
-            else:
-                expanded_ids.append(item)
+    def _populate_menu_with_ranges(self, menu, id_ranges, subgroup=None):
+        """Resolve, sort, group, and add items to a small popup menu."""
+        item_names = self._resolve_menu_refs(id_ranges)
+        subgroup = subgroup or ''
 
-        for item_id in expanded_ids:
-            self.add_items_to_menu(menu, item_id)
+        # Every submenu is alphabetized. Mixed submenus use a stable type or
+        # material group first so related items stay together instead of being
+        # scattered by one global alphabetical pass.
+        item_names.sort(key=lambda name: self._menu_sort_key(subgroup, name))
 
-    def add_items_to_menu(self, menu, item_id):
-        """Add a single item to a menu."""
-        # Check if the item_id exists in the available items list
-        if 0 <= item_id < len(self.editor.resources.get_items_id):
-            item_name = self.editor.resources.get_items_id[item_id]
-            display_name = self.editor.resources.data.get(item_name, {}).get('display_name', item_name)
-            icon_bitmap = self.editor.resources.get_icon_cache.get(item_name, wx.NullBitmap)
+        last_group = None
+        for item_name in item_names:
+            group_index = self._menu_group_index(subgroup, item_name)
+            if (
+                subgroup in MENU_GROUPED_SUBGROUPS
+                and last_group is not None
+                and group_index != last_group
+            ):
+                menu.AppendSeparator()
+            self.add_items_to_menu(menu, item_name)
+            last_group = group_index
 
-            # Create and append the menu item with an optional icon
-            menu_item = wx.MenuItem(menu, wx.ID_ANY, display_name)
-            if icon_bitmap and icon_bitmap.IsOk():
-                menu_item.SetBitmap(icon_bitmap)
+    def add_items_to_menu(self, menu, item_ref, seen_names=None):
+        """Add one item to a menu by legacy index or stable identifier."""
+        if isinstance(item_ref, str):
+            item_name = item_ref
+            if item_name not in self.editor.resources.data:
+                return
+        elif isinstance(item_ref, int):
+            if not (0 <= item_ref < len(self.editor.resources.get_items_id)):
+                return
+            item_name = self.editor.resources.get_items_id[item_ref]
+        else:
+            return
 
-            # Append to the submenu
-            menu.Append(menu_item)
+        if seen_names is not None:
+            if item_name in seen_names:
+                return
+            seen_names.add(item_name)
 
-            # Bind the event handler for the menu item
-            self.Bind(wx.EVT_MENU,
-                      lambda e, bid=item_name: self.on_menu_item_selected(e, bid),
-                      menu_item)
+        display_name = self.editor.resources.data.get(item_name, {}).get(
+            'display_name', item_name
+        )
+        icon_bitmap = self.editor.resources.get_scaled_cache32.get(
+            item_name, wx.NullBitmap
+        )
+
+        menu_item = wx.MenuItem(menu, wx.ID_ANY, display_name)
+        if icon_bitmap and icon_bitmap.IsOk():
+            menu_item.SetBitmap(icon_bitmap)
+        menu.Append(menu_item)
+
+        self.Bind(
+            wx.EVT_MENU,
+            lambda e, bid=item_name: self.on_menu_item_selected(e, bid),
+            menu_item,
+        )
 
     def update_main_menu(self, menu):
         """Update the main menu with items similar to the submenu behavior."""
@@ -3910,7 +7097,7 @@ class IconButton(wx.Panel):
             else:
                 continue
 
-            icon_bitmap = self.editor.resources.get_icon_cache.get(item_name, wx.NullBitmap)
+            icon_bitmap = self.editor.resources.get_scaled_cache32.get(item_name, wx.NullBitmap)
             display_name = self.editor.resources.data.get(item_name, {}).get('display_name', item_name)
 
             menu_item = wx.MenuItem(menu, wx.ID_ANY, display_name)
@@ -3922,20 +7109,22 @@ class IconButton(wx.Panel):
     def create_submenu(self, parent_menu, submenu_name, item_range):
         """Creates a submenu with the provided item range."""
         submenu = wx.Menu()
-        for item_id in item_range:
-            if 0 <= item_id < len(self.editor.resources.get_items_id):
-                item_name = self.editor.resources.get_items_id[item_id]
-                icon_bitmap = self.editor.resources.get_icon_cache.get(item_name, wx.NullBitmap)
-                display_name = self.editor.resources.data.get(item_name, {}).get('display_name', item_name)
+        item_names = self._resolve_menu_refs(item_range)
+        for item_name in item_names:
+            icon_bitmap = self.editor.resources.get_scaled_cache32.get(item_name, wx.NullBitmap)
+            display_name = self.editor.resources.data.get(item_name, {}).get('display_name', item_name)
 
-                menu_item = wx.MenuItem(submenu, wx.ID_ANY, display_name)
-                menu_item.SetBitmap(icon_bitmap)
-                submenu.Append(menu_item)
+            menu_item = wx.MenuItem(submenu, wx.ID_ANY, display_name)
+            menu_item.SetBitmap(icon_bitmap)
+            submenu.Append(menu_item)
 
-                self.Bind(wx.EVT_MENU, lambda event, idx=item_id: self.on_menu_item_selected(parent_menu,
-                                        self.editor.resources.get_items_id[idx]), menu_item)
+            self.Bind(
+                wx.EVT_MENU,
+                lambda event, bid=item_name: self.on_menu_item_selected(parent_menu, bid),
+                menu_item,
+            )
 
-        parent_menu.AppendSubMenu(submenu, submenu_name)
+        parent_menu.AppendSubMenu(submenu, submenu_name.replace('_', ' '))
 
     def Get_slot_map_key(self): # Main Slot Key tracking
         return self.slot_map_key
@@ -3951,8 +7140,18 @@ class IconButton(wx.Panel):
     def SetBitmap(self, icon, display_name):
         self.display_name = display_name
 
-        if icon and icon.IsOk():
-            self.button.SetBitmap(icon)
+        bitmap = icon
+        if self._compact_ui and self.bedrock_id:
+            try:
+                dpi_bitmap = self.editor.resources.get_dpi_bitmap(
+                    self.bedrock_id, self, logical_size=self._bitmap_size or 64
+                )
+                if dpi_bitmap and dpi_bitmap.IsOk():
+                    bitmap = dpi_bitmap
+            except Exception:
+                pass
+        if bitmap and bitmap.IsOk():
+            self.button.SetBitmap(bitmap)
 
         self.button.SetToolTip(wx.ToolTip(self.display_name))
 
@@ -3967,7 +7166,7 @@ class IconButton(wx.Panel):
         return (self.slot, self.bedrock_id, self.count_box.GetValue(),
                 self.display_name, self.tag_data)
 
-    def SetTheData(self, slot, bedrock_id, count, display_name, tag_data):  # # #
+    def SetTheData(self, slot, bedrock_id, count, display_name, tag_data):
          self.slot = slot
          self.bedrock_id =  bedrock_id
          self.count_box.SetValue(count)
@@ -3983,7 +7182,7 @@ class IconButton(wx.Panel):
     def edit_click(self, _, idx):
 
         self.icon_resources = IconResources()
-        self.icon_resources.toggle_catalog(self.parent, self.editor,  self.Get_slot_map_key())
+        self.icon_resources.toggle_catalog(self.editor, self.editor, self.Get_slot_map_key())
 
     def get_slot(self):
         return self.slot
@@ -3994,8 +7193,6 @@ class IconButton(wx.Panel):
     def UnbindButtonMenu(self):
         self.button.Unbind(wx.EVT_LEFT_UP, handler=self.on_left_click)
         self.button.Unbind(wx.EVT_ENTER_WINDOW, handler=self.on_hover_enter)
-        # self.button.Unbind(wx.EVT_LEAVE_WINDOW, handler=self.on_hover_leave)
-        # self.button.Bind(wx.EVT_LEAVE_WINDOW, self.on_left_up)
         self.button.Unbind(wx.EVT_LEFT_DOWN, handler=self.OnMouseDown)
         self.button.Unbind(wx.EVT_LEFT_UP, handler=self.on_left_click)
         self.button.Unbind(wx.EVT_RIGHT_DOWN, handler=self.on_right_click)
@@ -4018,47 +7215,103 @@ class IconButton(wx.Panel):
             DRAG_DATA_SOURCE.pop('keys', None)
         event.Skip()
 
-    def on_shift_up(self, event):
-        DRAG_DATA_SOURCE.pop('id', None)
 
 class InventoryEditorList(wx.Frame):
 
     def __init__(self, parent, canvas, world):
-        super().__init__(parent, title="Player List Double Click to Load", size=(400, 800),
-                         style=wx.DEFAULT_FRAME_STYLE | wx.STAY_ON_TOP)
+        super().__init__(parent, title="Player List Double Click to Load", size=(480, 260),
+                         style=_float_on_parent_style())
         self.parent = parent
         self.canvas = canvas
         self.world = world
-
-        self.open_editors = []  # Store references to open InventoryEditor instances
-
+        self.open_editors = []
         self.player_data = PlayersData(world)
         self.player_list = self.player_data.get_loaded_players_list
 
-        self.font = wx.Font(20, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD)
+        # Point-sized fonts are DPI-aware; do not multiply the size by the display scale.
+        self.font = wx.Font(19, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD)
         self.SetFont(self.font)
         self.SetForegroundColour((0, 255, 0))
         self.SetBackgroundColour((0, 0, 0))
 
         panel = wx.Panel(self)
         vbox = wx.BoxSizer(wx.VERTICAL)
-
         self.list_ctrl = wx.ListBox(panel, choices=self.player_list)
         self.list_ctrl.SetFont(self.font)
         self.list_ctrl.SetForegroundColour((0, 255, 0))
         self.list_ctrl.SetBackgroundColour((0, 0, 0))
 
-        vbox.Add(self.list_ctrl, 1, wx.EXPAND | wx.ALL, 10)
+        list_pad = _ui_metric(self, 10, 14)
+        vbox.Add(self.list_ctrl, 1, wx.EXPAND | wx.ALL, list_pad)
         self.list_ctrl.Bind(wx.EVT_LISTBOX_DCLICK, self.on_item_click)
         self.Bind(wx.EVT_CLOSE, self.on_close)
-        self.Centre()
         panel.SetSizer(vbox)
+        panel.Layout()
+        self._fit_player_list_window()
+        self.Centre()
+        _clamp_window_to_display(self)
         self.Show()
+        self.Raise()
+
+        if hasattr(wx, 'EVT_DISPLAY_CHANGED'):
+            self.Bind(wx.EVT_DISPLAY_CHANGED, self._on_display_metrics_changed)
+        if hasattr(wx, 'EVT_DPI_CHANGED'):
+            self.Bind(wx.EVT_DPI_CHANGED, self._on_display_metrics_changed)
+
+    def _fit_player_list_window(self):
+        try:
+            longest = max(self.player_list, key=len) if self.player_list else "~local_player"
+            text_width, text_height = self.list_ctrl.GetTextExtent(longest)
+            # Size against the window's display, not the primary monitor.
+            try:
+                display_index = wx.Display.GetFromWindow(self)
+                if display_index == wx.NOT_FOUND and self.GetParent() is not None:
+                    display_index = wx.Display.GetFromWindow(self.GetParent())
+                monitor = wx.Display(display_index) if display_index != wx.NOT_FOUND else wx.Display()
+                display = monitor.GetClientArea()
+                mode = monitor.GetCurrentMode()
+                compact_1080p = (
+                    _ui_dpi_scale(self) <= 1.10
+                    and mode.GetWidth() == 1920
+                    and mode.GetHeight() == 1080
+                )
+            except Exception:
+                display = wx.GetClientDisplayRect()
+                compact_1080p = False
+
+            title_floor = _ui_metric(self, 480, 760)
+            text_pad = _ui_metric(self, 170, 260)
+            # Reduce unused width only in the calibrated display modes.
+            # Actual text width still determines the minimum needed for names.
+            if compact_1080p:
+                title_floor = self.FromDIP(360)
+            elif _ui_is_1440p_150(self):
+                # Leave enough caption width for the complete title on wxMSW.
+                title_floor = 520
+                text_pad = 155
+            desired_width = max(title_floor, text_width + text_pad)
+            visible_rows = max(3, min(10, len(self.player_list) if self.player_list else 3))
+            row_height = text_height + _ui_metric(self, 8, 14)
+            content_height = visible_rows * row_height + _ui_metric(self, 72, 110)
+            desired_height = max(_ui_metric(self, 210, 300), content_height)
+            client_width = min(desired_width, int(display.width * 0.72))
+            client_height = min(desired_height, int(display.height * 0.58))
+            self.SetClientSize(wx.Size(client_width, client_height))
+            self.SetMinSize(wx.Size(min(client_width, _ui_metric(self, 430, 680)),
+                                    min(client_height, _ui_metric(self, 190, 260))))
+        except Exception:
+            pass
+
+    def _on_display_metrics_changed(self, event):
+        wx.CallAfter(self._fit_player_list_window)
+        wx.CallAfter(_clamp_window_to_display, self)
+        if event is not None:
+            event.Skip()
+
     def on_close(self, event):
         self.Hide()
         if __name__ == "__main__":
             self.world.close()
-
 
     def on_item_click(self, event):
         selection = self.list_ctrl.GetStringSelection()
@@ -4067,6 +7320,7 @@ class InventoryEditorList(wx.Frame):
             inventory_editor = InventoryEditor(self, selected_player, [])
             inventory_editor.Bind(wx.EVT_CLOSE, lambda evt, ed=inventory_editor: self._on_editor_close(evt, ed))
             inventory_editor.Show(True)
+            inventory_editor.Raise()
             self.open_editors.append(inventory_editor)
 
     def _on_editor_close(self, event, editor):
@@ -4074,23 +7328,6 @@ class InventoryEditorList(wx.Frame):
             self.open_editors.remove(editor)
         event.Skip()
 #############End Inventory Editor
-villager_workstations = {
-            "fisherman": "barrel",
-            "armorer": "blast_furnace",
-            "cleric": "brewing_stand",
-            "cartographer": "cartography_table",
-            "leatherworker": "cauldron",
-            "farmer": "composter",
-            "fletcher": "fletching_table",
-            "weaponsmith": "grindstone",
-            "librarian": "lectern",
-            "shepherd": "loom",
-            "toolsmith": "smithing_table",
-            "butcher": "smoker",
-            "mason": "stonecutter",
-            "": None
-        }
-workstation_to_profession = {v: k for k, v in villager_workstations.items() if v is not None}
 class RemapVillagers(wx.Frame):
     def __init__(self, parent, canvas, world,  *args, **kw):
         super(RemapVillagers, self).__init__(parent, *args, **kw,
@@ -4109,19 +7346,26 @@ class RemapVillagers(wx.Frame):
         self.SetForegroundColour((0, 255, 0))
         self.SetBackgroundColour((0, 0, 0))
         self.SetFont(self.font)
-        self.SetMinSize((510, 320))
+        pad = self.FromDIP(6)
+        self.SetMinClientSize(self.FromDIP(wx.Size(560, 360)))
         self._sizer = wx.BoxSizer(wx.VERTICAL)
         self._sizer_b = wx.BoxSizer(wx.HORIZONTAL)
-        self._sizer_top_buttons = wx.BoxSizer(wx.HORIZONTAL)
+        self._sizer_top_buttons = wx.GridSizer(0, 2, pad, pad)
         self.SetSizer(self._sizer)
         self.info_text = "Click on an item in list to see more option below:"
         self.info = wx.StaticText(self, label=self.info_text)
-        self.list = wx.ListBox(self, style=wx.TE_MULTILINE, size=(510, 320))
+        self.list = wx.ListBox(self, style=wx.LB_SINGLE,
+                               size=self.FromDIP(wx.Size(510, 230)))
         self.del_all = wx.Button(self, label="delete all village data")
-        self.re_cal = wx.Button(self, label="rebuild villager data")
-        self.save_villager  = wx.Button(self, label="Save Villagers and \n Sync data")
-        self.restore_villager = wx.Button(self, label="Restore Villager \n Sync data")
-        self.repair_digest = wx.Button(self, label="Experimental Repair \nVillager Chunk Data")
+        self.re_cal = wx.Button(self, label="Rebuild Village Data\n(On Hold)")
+        self.re_cal.Enable(False)
+        self.re_cal.SetToolTip("Village rebuilding is unavailable. Export and restore of village sync data remain available.")
+        self.save_villager = wx.Button(self, label="Export Village\nSync Data")
+        self.restore_villager = wx.Button(self, label="Restore Village\nSync Data")
+        self.repair_digest = wx.Button(self, label="Experimental Repair\nVillager Chunk Data")
+        for button in (self.re_cal, self.save_villager, self.restore_villager,
+                       self.repair_digest):
+            button.SetMinSize(self.FromDIP(wx.Size(230, 50)))
         self.items = [
             "Cut Prices",
             "Unbreakable Diamond Tools",
@@ -4133,279 +7377,95 @@ class RemapVillagers(wx.Frame):
             'Random prices for everything',
             'Unlock All trades'
         ]
-        self.check_list = wx.CheckListBox(self, choices=self.items)
-        self.check_list.Hide()
+        self.check_list = wx.CheckListBox(self, choices=self.items,
+                                          size=self.FromDIP(wx.Size(260, 230)))
         self.list.SetForegroundColour((0, 255, 0))
         self.list.SetBackgroundColour((0, 0, 0))
         self.list.SetFont(self.font)
         self.del_all.Bind(wx.EVT_BUTTON, self.del_village_data)
-        self.re_cal.Bind(wx.EVT_BUTTON, self.poi)
         self.list.Bind(wx.EVT_LISTBOX, self.on_select_list)
         self.save_villager.Bind(wx.EVT_BUTTON, self.save_villager_data)
         self.restore_villager.Bind(wx.EVT_BUTTON, self.restore_villager_data)
         self.repair_digest.Bind(wx.EVT_BUTTON, self.repair_villager_digest_pointers)
-        self._sizer_top_buttons.Add(self.save_villager, 0,  wx.LEFT, 11)
-        self._sizer_top_buttons.Add(self.restore_villager, 0,  wx.LEFT, 11)
-        self._sizer_top_buttons.Add(self.del_all, 0,  wx.LEFT, 11)
-        self._sizer_top_buttons.Add(self.re_cal, 0,  wx.LEFT, 11) #self.repair_digest
-        self._sizer_top_buttons.Add(self.repair_digest, 0, wx.LEFT, 11)  # self.repair_digest
-        self._sizer.Add(self._sizer_top_buttons)
-        self._sizer.Add(self.info, 0,  wx.LEFT, 21)
-        self._sizer_b.Add(self.list)
-        self._sizer_b.Add(self.check_list)
-        self._sizer.Add(self._sizer_b)
+        for button in (self.save_villager, self.restore_villager,
+                       self.del_all, self.re_cal, self.repair_digest):
+            self._sizer_top_buttons.Add(button, 0, wx.EXPAND)
+        self._sizer.Add(self._sizer_top_buttons, 0, wx.EXPAND | wx.ALL, pad)
+        self._sizer.Add(self.info, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, pad)
+        self._sizer_b.Add(self.list, 2, wx.EXPAND)
+        self._sizer_b.Add(self.check_list, 1, wx.EXPAND | wx.LEFT, pad)
+        self._sizer.Add(self._sizer_b, 1, wx.EXPAND | wx.LEFT | wx.RIGHT, pad)
+        self._sizer_b.Hide(self.check_list)
 
-        #self.progress = ProgressBar()
-        self.get_villager_locations()
-        self.Fit()
-        self.Layout()
-
-    def dim_village_name(self):
-        dim_name_part = b''
-        if 'minecraft:the_end' in self.canvas.dimension:
-            dim_name_part = b'VILLAGE_TheEnd_'
-        elif 'minecraft:the_nether' in self.canvas.dimension:
-            dim_name_part = b'VILLAGE_Nether_'
-        elif 'minecraft:overworld' in self.canvas.dimension:
-            dim_name_part = b'VILLAGE_Overworld_'
-        return dim_name_part
-
-    def make_instances(self, list_of_poi : dict):
-        vill_type_map = {
-            'butcher': {'SoundEvent': 'block.smoker.smoke', 'Weight': 5, 'InitEvent': 'minecraft:become_butcher'},
-            'fletcher': {'SoundEvent': 'block.fletching_table.use', 'Weight': 5,
-                         'InitEvent': 'minecraft:become_fletcher'},
-            'toolsmith': {'SoundEvent': 'block.smithing_table.use', 'Weight': 5,
-                          'InitEvent': 'minecraft:become_toolsmith'},
-            'cartographer': {'SoundEvent': 'block.cartography_table.use', 'Weight': 6,
-                             'InitEvent': 'minecraft:become_cartographer'},
-            'weaponsmith': {'SoundEvent': 'block.grindstone.use', 'Weight': 5,
-                            'InitEvent': 'minecraft:become_weaponsmith'},
-            'armorer': {'SoundEvent': 'block.blastfurnace.fire_crackle', 'Weight': 5,
-                        'InitEvent': 'minecraft:become_armorer'},
-            'shepherd': {'SoundEvent': 'block.loom.use', 'Weight': 3, 'InitEvent': 'minecraft:become_shepherd'},
-            'leatherworker': {'SoundEvent': 'bucket.fill.water', 'Weight': 5,
-                              'InitEvent': 'minecraft:become_leatherworker'},
-            'librarian': {'SoundEvent': 'item.book.put', 'Weight': 8, 'InitEvent': 'minecraft:become_librarian'},
-            'mason': {'SoundEvent': 'block.stonecutter.use', 'Weight': 3, 'InitEvent': 'minecraft:become_mason'},
-            'cleric': {'SoundEvent': 'potion.brewed', 'Weight': 8, 'InitEvent': 'minecraft:become_cleric'},
-            'fisherman': {'SoundEvent': 'block.barrel.open', 'Weight': 3, 'InitEvent': 'minecraft:become_fisherman'},
-            'farmer': {'SoundEvent': 'block.composter.fill', 'Weight': 1, 'InitEvent': 'minecraft:become_farmer'},
-            'none': {'SoundEvent': '', 'Weight': 0, 'InitEvent': ''},
-        }
-        def instances_of(x,y,z,ie='',name='villager',radius=0.75,_type=0,sound='undefined',weight=1, useaabb=1):
-            tag_ = CompoundTag({
-                "Capacity" : LongTag(1),
-                'InitEvent': StringTag(ie),
-                'Name': StringTag(name),
-                'OwnerCount': LongTag(1),
-                'Radius': FloatTag(radius),
-                'Skip': ByteTag(0),
-                'SoundEvent': StringTag(sound),
-                'Type': IntTag(_type),
-                'UseAABB': ByteTag(useaabb),
-                'Weight': LongTag(weight),
-                'X': IntTag(x),
-                'Y': IntTag(y),
-                'Z': IntTag(z),
-            })
-            return tag_
-
-        bed, work, pof = (list_of_poi.get('bed',(0,0,0)),list_of_poi.get('work',(0,0,0)) ,
-                          list_of_poi.get('profession', 'none'))
-        inst = ListTag([])
-        x,y,z = bed
-        inst.append(instances_of(x,y,z))
-        inst.append(CompoundTag({'Skip':ByteTag(1)}))
-        x, y, z = work
-
-        v_data = vill_type_map.get(list_of_poi.get(pof,'none'))
-
-        inst.append(instances_of(x,y,z,
-                                ie=v_data['InitEvent'],name=pof,radius=2,_type=2,
-                                sound=v_data['SoundEvent'],weight=v_data['Weight'],useaabb=0 ))
-        return inst
-
-    def make_new_village_poi(self, list_of_villagers):
-        poi_dict = {}
-        for v_id,data in list_of_villagers.items():
-            poi = CompoundTag({'POI': ListTag([])})
-            for uid in data.keys():
-                poi["POI"].append(CompoundTag({'VillagerID': LongTag(uid), 'instances': self.make_instances(data[uid])}))
-            poi_dict[v_id] = poi
-        return poi_dict
-
-    def calculate_village_boundaries(self, clusters, radius=64):
-        """
-        Calculates village boundaries for each cluster.
-
-        Args:
-            clusters (list of list): List of clusters, where each cluster is a list of bed coordinates.
-            radius (int): Radius to expand the boundary.
-
-        Returns:
-            list of dict: A list of boundaries for each cluster as dictionaries with min/max for x, y, z.
-        """
-        boundaries = collections.defaultdict(dict)
-
-        for cluster in clusters:
-            min_x = min(bed[0] for bed in cluster) - radius
-            max_x = min(bed[0] for bed in cluster) + radius
-            min_y = min(bed[1] for bed in cluster) - 12
-            max_y = max(bed[1] for bed in cluster) + 12
-            min_z = max(bed[2] for bed in cluster) - radius
-            max_z = max(bed[2] for bed in cluster) + radius
-
-            boundaries[str(uuid.uuid4())].update({
-                "X0": min_x,
-                "X1": max_x,
-                "Y0": min_y,
-                "Y1": max_y,
-                "Z0": min_z,
-                "Z1": max_z,
-            })
-
-        return boundaries
-
-    def find_villager_key(self, villager_x, villager_y, villager_z, bounding_dict):
-        for key, bounds in bounding_dict.items():
-            if (bounds['X0'] <= villager_x <= bounds['X1'] and
-                    bounds['Y0'] <= villager_y <= bounds['Y1'] and
-                    bounds['Z0'] <= villager_z <= bounds['Z1']):
-                return key
-        return None  # Return None if no match is found
-
-    def cluster_beds_by_radius(self, beds, radius=32):
-        """
-        Groups beds into clusters based on a given radius.
-
-        Args:
-            beds (list of tuple): List of bed coordinates (x, y, z).
-            radius (int): Radius within which beds are clustered.
-
-        Returns:
-            list of list: A list of clusters, where each cluster is a list of bed coordinates.
-        """
-        clusters = []
-        visited = set()
-
-        def dfs(bed, cluster):
-            visited.add(bed)
-            cluster.append(bed)
-            for other_bed in beds:
-                if other_bed not in visited:
-                    dx, dy, dz = abs(bed[0] - other_bed[0]), abs(bed[1] - other_bed[1]), abs(bed[2] - other_bed[2])
-                    if dx <= radius and dy <= radius and dz <= radius:
-                        dfs(other_bed, cluster)
-
-        for bed in beds:
-            if bed not in visited:
-                cluster = []
-                dfs(bed, cluster)
-                clusters.append(cluster)
-
-        return clusters
-    def on_select_list(self,_):
-        try:
-            self._sizer.Remove(self.sizer)
-        except:
-            pass
-        self.sizer = wx.BoxSizer(wx.HORIZONTAL)
+        # Create the selection actions once, rather than adding new controls
+        # every time a different village is selected.
+        self.sizer = wx.GridSizer(0, 2, pad, pad)
         self.go_to = wx.Button(self, label="Go to location")
         self.select_center = wx.Button(self, label="Select Center")
         self.select_village_bounds = wx.Button(self, label="Select Bounds")
         self.super_trade = wx.Button(self, label="Apply Super Trading")
-
         self.go_to.Bind(wx.EVT_BUTTON, self.set_go_to)
         self.select_center.Bind(wx.EVT_BUTTON, self.set_select_center)
         self.select_village_bounds.Bind(wx.EVT_BUTTON, self.set_village_bounds)
         self.super_trade.Bind(wx.EVT_BUTTON, self.set_villager_trades)
-        self.check_list.Show()
-        self.sizer.Add(self.go_to, 0,  wx.LEFT, 11)
-        self.sizer.Add(self.select_center, 0,  wx.LEFT, 11)
-        self.sizer.Add(self.select_village_bounds, 0,  wx.LEFT, 11)
-        self.sizer.Add(self.super_trade, 0,  wx.LEFT, 161)
-        self._sizer.Add(self.sizer)
+        for button in (self.go_to, self.select_center,
+                       self.select_village_bounds, self.super_trade):
+            self.sizer.Add(button, 0, wx.EXPAND)
+        self._sizer.Add(self.sizer, 0, wx.EXPAND | wx.ALL, pad)
+        self._sizer.Hide(self.sizer, recursive=True)
+
+        self.get_villager_locations()
         self.Fit()
         self.Layout()
 
+
+    def on_select_list(self, _):
+        # Selection actions are available only for a village in the current list.
+        has_selection = self.list.GetStringSelection() in self.village_locations
+        if has_selection:
+            self._sizer_b.Show(self.check_list)
+            self._sizer.Show(self.sizer, recursive=True)
+        else:
+            self._sizer_b.Hide(self.check_list)
+            self._sizer.Hide(self.sizer, recursive=True)
+        self.Fit()
+        self.Layout()
+
+    def _selected_village_data(self):
+        selection = self.list.GetStringSelection()
+        data = self.village_locations.get(selection)
+        if data is None:
+            wx.MessageBox('Select a village from the list before using this action.',
+                          'Village Data', wx.OK | wx.ICON_INFORMATION, self)
+        return data
+
     def set_go_to(self, _):
-        data = self.village_locations[self.list.GetStringSelection()]
+        data = self._selected_village_data()
+        if data is None:
+            return
         a,b,c,d,e,f = data['center']
         self.canvas.camera.set_location((a,b+40,c))
 
     def set_select_center(self, _):
-        data = self.village_locations[self.list.GetStringSelection()]
+        data = self._selected_village_data()
+        if data is None:
+            return
         a, b, c, d, e, f = data['center']
         sel = SelectionGroup(SelectionBox((a,b,c),(d,e,f)))
         self.canvas.selection.set_selection_group(sel)
-        # print((a, b, c), (d, e, f))
 
     def set_village_bounds(self, _):
-        data = self.village_locations[self.list.GetStringSelection()]
+        data = self._selected_village_data()
+        if data is None:
+            return
         a, b, c, d, e, f = data['bounds']
         sel = SelectionGroup(SelectionBox((a, b, c), (d, e, f)))
         self.canvas.selection.set_selection_group(sel)
-        # print((a, b, c), (d, e, f), self.village_locations)
 
-
-    def set_new_location(self, new_map_bed_and_work, location_station):
-        def find_adjacent_key(target_key, key_dict):
-            tx, ty, tz = target_key
-
-            for k in key_dict.keys():
-
-                dx, dy, dz = k[0] - tx, k[1] - ty, k[2] - tz
-                diffs = [dx, dy, dz]
-
-                # Must have one value as +1 or -1, rest must be 0
-                if diffs.count(0) == 2 and any(abs(d) == 1 for d in diffs):
-                    return k  # Return the first valid match
-
-            return None  # If no match found
-        updated_actors = collections.defaultdict(dict)
-        for k,v in list(new_map_bed_and_work.items()):
-
-            for ik,iv in v.items():
-
-                uid = ik
-                uuid = struct.pack('<q', uid)
-                acnt, wrldcnt = struct.unpack('<LL', uuid)
-                wc = 4294967296 - wrldcnt
-                prefix = struct.pack('>LL', wc, acnt)  # convert the ID to actor prefix
-                data = self.level_db.get(b'actorprefix' + prefix)
-                act_nbt = load(data, compressed=False, little_endian=True,
-                                          string_decoder=utf8_escape_decoder).compound
-                if 'minecraft:villager_v2' in  act_nbt.get('identifier', StringTag()).py_str:
-
-                    newkey = find_adjacent_key(iv['villager'], location_station)
-
-                    act_nbt['PreferredProfession'] = StringTag(workstation_to_profession[location_station[newkey]])
-                    act_nbt.pop('Offers', None)#act_nbt['Offers'] = CompoundTag({})
-                    preferred_profession = act_nbt['PreferredProfession'].py_str
-                    act_nbt['TradeTablePath'] = StringTag(f'trading/economy_trades/{preferred_profession}_trades.json')
-                    # act_nbt.pop('definitions')
-                    act_nbt['definitions'] = ListTag([
-                        StringTag('+minecraft:villager_v2'),
-                        StringTag(f'+{preferred_profession}'),
-                        StringTag('-trade_resupply_component_group'),
-                        StringTag('-play_schedule_villager'),
-                        StringTag('-baby'),
-                        StringTag('+make_and_receive_love'),
-                        StringTag('+gather_schedule_villager'),
-                        StringTag('-job_specific_goals'),
-                        StringTag('+adult'),
-                        StringTag('+behavior_non_peasant'),
-                        StringTag('+work_schedule_villager'),
-                        StringTag('+work_schedule')
-                    ])
-                    raw_new = act_nbt.save_to(compressed=False, little_endian=True,string_encoder=utf8_escape_encoder)
-                    updated_actors[b'actorprefix' + prefix] = raw_new
-
-        for k, v in updated_actors.items():
-            self.level_db.put(k, v)
 
     def set_villager_trades(self, _):
+        if self._selected_village_data() is None:
+            return
         ENCHANTMENTS = {
             "fletcher": {
                 "minecraft:bow": [
@@ -4571,7 +7631,6 @@ class RemapVillagers(wx.Frame):
                             preferred_profession = str(act_nbt.get('PreferredProfession'))
 
                             definitions = str(act_nbt.get('definitions'))
-                            # print(preferred_profession, definitions)
                             if 8 in self.check_list.GetCheckedItems():
                                 act_nbt['TradeExperience'] = IntTag(500)
                             if act_nbt.get('Offers', None):
@@ -4639,12 +7698,10 @@ class RemapVillagers(wx.Frame):
                             real = self.level_db.get(k)
                             for p in d:
                                 if p not in real:
-                                    print(' ERROR YOU SHOULD NOT SEE')  # Really TODO HERE Just
-                        #packed_digp = {}
-
-                        # packed_digp[k] = b''.join(d)
-                        # print(packed_digp)
+                                    print(f"Village digest {k!r} is missing actor prefix {p.hex()}.")
     def get_villager_locations(self):
+        previous_selection = self.list.GetStringSelection()
+        self.village_locations = {}
         items_info = []
         list_dwellers = []
         dwellers = {}
@@ -4662,309 +7719,236 @@ class RemapVillagers(wx.Frame):
                                                       'center': (
                                                       mid[0], mid[1], mid[2], mid[0] + 1, mid[1] + 1, mid[2] + 1)}
         self.list.SetItems(items_info)
+        if previous_selection in self.village_locations:
+            self.list.SetStringSelection(previous_selection)
+        if self.list.IsShown():
+            self.on_select_list(None)
+        else:
+            self._sizer_b.Hide(self.check_list)
+            self._sizer.Hide(self.sizer, recursive=True)
+
+    @staticmethod
+    def _village_sync_record_parts(key):
+        """Identify the village and record type in a Bedrock village database key."""
+        if not isinstance(key, str) or not key.startswith('VILLAGE_'):
+            raise ValueError(f"Invalid village sync key: {key!r}")
+        stem, separator, record_type = key.rpartition('_')
+        if not separator or record_type not in ('INFO', 'POI', 'PLAYERS', 'DWELLERS'):
+            raise ValueError(f"Unsupported village sync record: {key!r}")
+        dimension, separator, village_id = stem[len('VILLAGE_'):].partition('_')
+        if (not separator or dimension not in ('Overworld', 'Nether', 'TheEnd')
+                or not village_id or '_' in village_id):
+            raise ValueError(f"Invalid village sync identifier: {key!r}")
+        return f"VILLAGE_{dimension}_{village_id}_", record_type
 
     def restore_villager_data(self, _):
-        dialog = wx.FileDialog(
-            self,
-            "Select a File",
-            wildcard="NBT files (*.nbt)|*.nbt|All files (*.*)|*.*",
-            style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST  # No FD_MULTIPLE here
-        )
+        # Only village sync records are restored. Actor snapshots require a
+        # separate entity-index recovery procedure and are not written here.
+        with wx.FileDialog(
+                self, 'Open Village Sync Data',
+                wildcard='NBT files (*.nbt)|*.nbt|All files (*.*)|*.*',
+                style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as dialog:
+            if dialog.ShowModal() != wx.ID_OK:
+                return
+            file_path = dialog.GetPath()
 
-        if dialog.ShowModal() == wx.ID_OK:
-            file_path = dialog.GetPath()  # Single file path
-            file_name = os.path.splitext(os.path.basename(file_path))[0]
-            nbt_data = load(file_path, compressed=False, little_endian=True,
-                            string_decoder=utf8_escape_decoder).compound
-            for k, v in nbt_data.items():
-                if 'villager_data' not in k:
-                    raw_nbt = v.save_to(compressed=False, little_endian=True, string_encoder=utf8_escape_encoder)
-                    self.level_db.put(str(fn).encode(), raw_nbt)
-                else:
-                    pass
-                    #TODO add method to restore missing villagers no duplicates
-        dialog.Destroy()
+        try:
+            saved = load(file_path, compressed=False, little_endian=True,
+                         string_decoder=utf8_escape_decoder).compound
+            if not isinstance(saved, CompoundTag):
+                raise ValueError('The backup root must be an NBT compound.')
+
+            staged = {}
+            village_prefixes = set()
+            for key, value in saved.items():
+                if key == 'villager_data':
+                    if not isinstance(value, ListTag):
+                        raise ValueError('The villager_data field must be an NBT list.')
+                    continue
+                prefix, record_type = self._village_sync_record_parts(key)
+                if not isinstance(value, CompoundTag):
+                    raise ValueError(f"Village sync record {key!r} must be a compound.")
+                required_fields = {
+                    'INFO': ('X0', 'Y0', 'Z0', 'X1', 'Y1', 'Z1'),
+                    'POI': ('POI',),
+                    'PLAYERS': ('Players',),
+                    'DWELLERS': ('Dwellers',),
+                }[record_type]
+                if any(field not in value for field in required_fields):
+                    raise ValueError(f"Village sync record {key!r} is missing required fields.")
+                if record_type == 'INFO':
+                    for field in required_fields:
+                        _ = value[field].py_int
+                elif not isinstance(value[required_fields[0]], ListTag):
+                    raise ValueError(f"Village sync record {key!r} must contain an NBT list.")
+                village_prefixes.add(prefix)
+                key_bytes = key.encode('ascii')
+                staged[key_bytes] = value.save_to(
+                    compressed=False, little_endian=True,
+                    string_encoder=utf8_escape_encoder)
+
+            if len(village_prefixes) != 1 or not staged:
+                raise ValueError('The file must contain sync records for exactly one village.')
+            prefix = next(iter(village_prefixes))
+            needed = {f'{prefix}{kind}'.encode('ascii')
+                      for kind in ('INFO', 'POI', 'PLAYERS', 'DWELLERS')}
+            if set(staged) != needed:
+                raise ValueError('The village sync backup is incomplete; all four records are required.')
+
+            # Read every previous value before the first database write.
+            previous = {}
+            for key in staged:
+                try:
+                    previous[key] = self.level_db.get(key)
+                except KeyError:
+                    previous[key] = None
+            changed = [(key, raw) for key, raw in staged.items()
+                       if previous[key] != raw]
+        except Exception as exc:
+            wx.MessageBox(f'Village sync restore was not started: {exc}',
+                          'Village Sync Data', wx.OK | wx.ICON_ERROR, self)
+            return
+
+        if not changed:
+            wx.MessageBox('These village sync records already match the world. Nothing was changed.',
+                          'Village Sync Data', wx.OK | wx.ICON_INFORMATION, self)
+            return
+
+        overwritten = sum(previous[key] is not None for key, _ in changed)
+        added = len(changed) - overwritten
+        message = (
+            f'Village: {prefix[:-1]}\n'
+            f'Records to replace: {overwritten}\n'
+            f'Records to add: {added}\n\n'
+            'This changes village sync records in the open world. '
+            'It does not restore villager entities or their chunk indexes.\n\n'
+            'Continue only in a disposable copy of the world with a separate backup.'
+        )
+        if wx.MessageBox(message, 'Confirm Village Sync Restore',
+                         wx.YES_NO | wx.NO_DEFAULT | wx.ICON_WARNING, self) != wx.YES:
+            return
+
+        written = []
+        try:
+            for key, raw in changed:
+                written.append(key)
+                self.level_db.put(key, raw)
+        except Exception as exc:
+            rollback_failures = []
+            for key in reversed(written):
+                try:
+                    old = previous[key]
+                    if old is None:
+                        self.level_db.delete(key)
+                    else:
+                        self.level_db.put(key, old)
+                except Exception as rollback_exc:
+                    rollback_failures.append(f'{key!r}: {rollback_exc}')
+            message = f'Village sync restore failed: {exc}'
+            if rollback_failures:
+                message += ('\nRollback was incomplete. Do not use this world. '
+                            'Restore its separate backup before proceeding.\n' +
+                            '\n'.join(rollback_failures))
+            else:
+                message += '\nPreviously written records were rolled back.'
+            wx.MessageBox(message, 'Village Sync Data', wx.OK | wx.ICON_ERROR, self)
+            return
+
+        try:
+            self.get_villager_locations()
+        except Exception as exc:
+            print(f'Village sync records were restored, but the village list could not refresh: {exc}')
+        wx.MessageBox(f'Restored {len(changed)} village sync records. Villager entities were not restored.',
+                      'Village Sync Data', wx.OK | wx.ICON_INFORMATION, self)
 
     def save_villager_data(self, _):
-        dialog = wx.FileDialog(
-            self, "Save Files", defaultFile= 'NAME YOU FILE', wildcard="NBT files (*.nbt)|*.nbt|All files (*.*)|*.*",
-            style=wx.DD_DEFAULT_STYLE
-        )
+        selection = self.list.GetStringSelection()
+        if not selection:
+            wx.MessageBox('Select a village before saving its sync data.',
+                          'Village Sync Data', wx.OK | wx.ICON_INFORMATION, self)
+            return
+        parts = selection.split(':', 2)
+        if len(parts) != 3:
+            wx.MessageBox('The selected village identifier is invalid.',
+                          'Village Sync Data', wx.OK | wx.ICON_ERROR, self)
+            return
+        dimension, village_id, _ = parts
+        prefix = f'VILLAGE_{dimension}_{village_id}_'
+        try:
+            self._village_sync_record_parts(prefix + 'INFO')
+            expected = {f'{prefix}{kind}'.encode('ascii')
+                        for kind in ('INFO', 'POI', 'PLAYERS', 'DWELLERS')}
+            exported = CompoundTag({'villager_data': ListTag([])})
+            for key, raw in self.level_db.iterate(start=b'VILLAGE', end=b'\xff' * 40):
+                if key not in expected:
+                    continue
+                exported[key.decode('ascii')] = load(
+                    raw, compressed=False, little_endian=True,
+                    string_decoder=utf8_escape_decoder).compound
+                if key.endswith(b'_DWELLERS'):
+                    for dweller in exported[key.decode('ascii')]['Dwellers']:
+                        for actor in dweller.get('actors', ()):
+                            uid = actor['ID'].py_data
+                            acnt, wrldcnt = struct.unpack('<LL', struct.pack('<q', uid))
+                            actor_key = b'actorprefix' + struct.pack('>LL', 4294967296 - wrldcnt, acnt)
+                            actor_raw = self.level_db.get(actor_key)
+                            if actor_raw is None:
+                                raise ValueError(f'Missing villager actor record: {actor_key!r}')
+                            actor_nbt = load(actor_raw, compressed=False, little_endian=True,
+                                             string_decoder=utf8_escape_decoder).compound
+                            exported['villager_data'].append(actor_nbt)
+            if set(exported.keys()) - {'villager_data'} != {
+                    key.decode('ascii') for key in expected}:
+                raise ValueError('The selected village does not have all four sync records.')
+            file_data = exported.save_to(compressed=False, little_endian=True,
+                                         string_encoder=utf8_escape_encoder)
+        except Exception as exc:
+            wx.MessageBox(f'Village sync export failed: {exc}',
+                          'Village Sync Data', wx.OK | wx.ICON_ERROR, self)
+            return
 
-        if dialog.ShowModal() == wx.ID_OK:
-            file_path = dialog.GetDirectory()  # Gets the selected file path
-            # file_name = os.path.splitext(os.path.basename(file_path))[0]  # Extracts the file name without extension
-            selected = self.list.GetStringSelection().split(':')[1]
-            villager_list = CompoundTag({'villager_data': ListTag([])})
-            for k, v in self.level_db.iterate(start=b'VILLAGE', end=b'VILLAGE\xFF' * 40):
-                if selected.encode() in k:
-                    if b'VILLAGE' in k:
-                        nbt = load(v, compressed=False, little_endian=True, string_decoder=utf8_escape_decoder).compound
-                        villager_list[k.decode()] = nbt
+        filename = f'village_sync_{dimension}_{village_id}.nbt'
+        with wx.FileDialog(
+                self, 'Save Village Sync Data', defaultFile=filename,
+                wildcard='NBT files (*.nbt)|*.nbt',
+                style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT) as dialog:
+            if dialog.ShowModal() != wx.ID_OK:
+                return
+            file_path = dialog.GetPath()
+        temp_path = None
+        try:
+            # Write the complete backup before replacing the chosen file.
+            import tempfile
+            with tempfile.NamedTemporaryFile(mode='wb', prefix='.village_sync_',
+                                             suffix='.tmp', dir=os.path.dirname(file_path),
+                                             delete=False) as temporary:
+                temp_path = temporary.name
+                temporary.write(file_data)
+                temporary.flush()
+                os.fsync(temporary.fileno())
+            os.replace(temp_path, file_path)
+        except Exception as exc:
+            wx.MessageBox(f'Village sync export could not be saved: {exc}',
+                          'Village Sync Data', wx.OK | wx.ICON_ERROR, self)
+            return
+        finally:
+            if temp_path is not None and os.path.exists(temp_path):
+                try:
+                    os.unlink(temp_path)
+                except OSError:
+                    print(f'Could not remove temporary village sync file: {temp_path}')
 
-                    if b'DWELLERS' in k:
-                        nbt_dwellers = load(v, compressed=False, little_endian=True,
-                                            string_decoder=utf8_escape_decoder).compound
-                        for c in nbt_dwellers.get('Dwellers'):
-                            if c.get('actors'):
-                                for a in c.get('actors'):
-                                    uid = a.get('ID').py_data
-                                    uuid = struct.pack('<q', uid)
-                                    acnt, wrldcnt = struct.unpack('<LL', uuid)
-                                    wc = 4294967296 - wrldcnt
-                                    prefix = struct.pack('>LL', wc, acnt)  # convert the ID to actor prefix
-                                    data = self.level_db.get(b'actorprefix' + prefix)
-                                    act_nbt = load(data, compressed=False, little_endian=True,
-                                                   string_decoder=utf8_escape_decoder).compound
-                                    villager_list['villager_data'].append(act_nbt)
-                    villager_list.save_to((file_path + r"\\" + 'villagers ' + ".nbt")
-                                                      , compressed=False, little_endian=True,
-                                                      string_encoder=utf8_escape_encoder)
-
-        dialog.Destroy()
+        wx.MessageBox(
+            f'Village sync data saved to:\n{file_path}\n\n'
+            'The file also contains villager snapshots for reference. '
+            'Restore Village Sync Data does not recreate villager entities.',
+            'Village Sync Data', wx.OK | wx.ICON_INFORMATION, self)
 
     def del_village_data(self,_):
         for k, v in self.level_db.iterate(start=b'VILLAGE', end=b'\xFF' * 40): #long end
             if b'VILLAGE' in k:
                 self.level_db.delete(k)
-
-        # for k, v in self.level_db.iterate(start=b'actorprefix',end=b'actorprefix\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF'):
-        #     nbt = load(v,compressed=False, little_endian=True, string_decoder=utf8_escape_decoder).compound
-        #     print(nbt['internalComponents']['EntityStorageKeyComponent']['StorageKey'].save_to(
-        #         compressed=False, little_endian=True, string_encoder=utf8_escape_encoder))
-        #
-        # for k, v in self.level_db.iterate(start=b'digp', end=b'\xFF' * 12):
-        #     print(k)
-        #     self.level_db.delete(k)
-
-    def poi(self, _):
-
-        self.list.Hide()
-        self.info.SetLabel('Loading.......')#self.info_text
-        for k, v in self.level_db.iterate(start=b'VILLAGE', end=b'\xFF' * 40):  # long end
-            if b'VILLAGE' in k:
-                self.level_db.delete(k)
-
-        pallet = self.world.block_palette.blocks
-        found_stations = {}
-        found_beds = {}
-        location_station = {}
-        location_beds = {}
-
-        self.all_chunk = [x for x in self.world.level_wrapper.all_chunk_coords(self.canvas.dimension)]
-
-        villager_workstations_values = set(villager_workstations.values())  # Precompute the set for faster lookup
-        for i, block in enumerate(pallet):
-            if block.base_name in villager_workstations_values:  # O(1) lookup time in set
-                found_stations[i] = block.base_name
-            elif 'bed' == block.base_name and block.properties.get('part', StringTag('')).py_str == 'head':
-                found_beds[i] = block.base_name
-
-        station_keys = set(found_stations.keys())
-        bed_keys = set(found_beds.keys())
-        for cx, cz in self.all_chunk:
-            data = self.world.get_chunk(cx, cz, self.canvas.dimension)
-            # Loop through the sections and sub-chunks
-            for cy in data.blocks.sections:
-                main_sub = data.blocks.get_sub_chunk(cy)
-                # Get the indices of all matching stations and beds in one go
-                station_locations = numpy.isin(main_sub, list(station_keys))  # Fast boolean array of station locations
-                bed_locations = numpy.isin(main_sub, list(bed_keys))  # Fast boolean array of bed locations
-                # Use numpy's nonzero to find the indices of matches
-                station_coords = numpy.transpose(numpy.nonzero(station_locations))  # Get coordinates of matching stations
-                bed_coords = numpy.transpose(numpy.nonzero(bed_locations))  # Get coordinates of matching beds
-                # Update locations for stations
-                for xx, yy, zz in station_coords:
-                    location_station[((cx * 16) + xx, (cy * 16) + yy, (cz * 16) + zz)] = pallet[
-                        main_sub[xx, yy, zz]].base_name
-
-                  # Update locations for beds
-                for xx, yy, zz in bed_coords:
-                    location_beds[((cx * 16) + xx, (cy * 16) + yy, (cz * 16) + zz)] = pallet[
-                        main_sub[xx, yy, zz]].base_name
-
-            all_actor_id_location = collections.defaultdict(dict)
-
-        self.all_digp = []
-        for k, v in self.level_db.iterate(start=b'digp',end=b'digp\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF'):
-            if len(v) > 0:
-                self.all_digp.append(k)
-
-        chunk_dkeys = {}
-        clusters = self.cluster_beds_by_radius(list(location_beds.keys()))
-        bounds = self.calculate_village_boundaries(clusters)
-
-        for cx, cz in self.all_chunk:
-            chunk_dig_key = b'digp' + self.get_dim_chunkkey(cx, cz)
-            if chunk_dig_key in self.all_digp:
-                digest_keys = self.level_db.get(chunk_dig_key)
-                chunk_dkeys[chunk_dig_key] = [b'actorprefix' + digest_keys[i:i + 8] for i in
-                                              range(0, len(digest_keys), 8)]
-
-        for k, li in chunk_dkeys.items():
-            for i, prefix in enumerate(li):
-                try:
-                    v = self.level_db.get(prefix)
-                    nbt = load(v, compressed=False, little_endian=True, string_decoder=utf8_escape_decoder).compound
-                    actor_type = nbt.get('identifier', StringTag()).py_str
-                except:
-                    print(f'skipping {prefix}')
-                if 'minecraft:villager_v2' in actor_type:
-                    x, y, z = nbt.get('Pos', ListTag()).py_data
-                    dewlling_id = self.find_villager_key(int(x), int(y), int(z), bounds)
-                    if nbt.get('DwellingUniqueID', None):
-                        nbt['DwellingUniqueID'] = StringTag(dewlling_id)
-                        raw_nbt = nbt.save_to(compressed=False, little_endian=True, string_encoder=utf8_escape_encoder)
-                        self.level_db.put(prefix, raw_nbt)
-                    uniqu_id = nbt.get('UniqueID', LongTag(0)).py_data
-                    dwelling_unique_id = nbt.get('DwellingUniqueID', StringTag()).py_data
-                    preferred_profession = nbt.get('PreferredProfession', StringTag()).py_data  # NEED TO BUILD uuid4
-                    all_actor_id_location[dwelling_unique_id].update(
-                        {uniqu_id: {'Pos': (int(x), int(y), int(z)),
-                                    'profession': preferred_profession}})
-
-        def euclidean_distance(t1, t2): #numpy
-                return numpy.linalg.norm(numpy.array(t1) - numpy.array(t2))
-        # def euclidean_distance(t1, t2): #old
-        #     return math.sqrt(sum((a - b) ** 2 for a, b in zip(t1, t2)))
-
-        takin_beds = set()  # Use sets for faster lookups
-        takin_stations = set()
-        villager_done = set()
-        new_map_bed_and_work = collections.defaultdict(dict)
-
-        for k, v in all_actor_id_location.items():
-            for uid, vdata in v.items():
-                villager_location = vdata['Pos']
-                profession = vdata['profession']
-
-                if villager_location in villager_done:
-                    continue
-
-                closest_pair_bed = None
-                min_distance_bed = 50.0
-                closest_pair_station = None
-                min_distance_station = 50.0
-
-                for cbed in location_beds.keys():
-                    if cbed not in takin_beds:
-                        distance = euclidean_distance(villager_location, cbed)
-                        if distance < min_distance_bed:
-                            min_distance_bed = distance
-                            closest_pair_bed = cbed
-
-                for cloc in location_station.keys():
-
-                    if cloc not in takin_stations:
-                        if location_station[cloc] in villager_workstations[profession]:
-                            distance = euclidean_distance(villager_location, cloc)
-                            if distance < min_distance_station:
-                                min_distance_station = distance
-                                closest_pair_station = cloc
-
-                if closest_pair_bed and closest_pair_station:
-                    takin_beds.add(closest_pair_bed)
-                    takin_stations.add(closest_pair_station)
-                    new_map_bed_and_work[k][uid] = {
-                        'bed': closest_pair_bed,
-                        'work': closest_pair_station,
-                        'work_block': location_station[closest_pair_station],
-                        'profession': profession,
-                        'profession_block': villager_workstations[profession],
-                        'villager': villager_location,
-                        'distance_bed': min_distance_bed,
-                        'distance_station': min_distance_station,
-                    }
-                    villager_done.add(villager_location)
-                else:
-                    print(f"No match found for villager {uid} at {villager_location}")
-
-        poi_data = self.make_new_village_poi(new_map_bed_and_work)
-        # this remaps the villager to the workstation they are next to : Force  changes there profession
-        force_villager_typo = wx.MessageBox("You may not need this, Choose yes"
-                                            " If you have villagers by the wrong Stations \n ",
-                                       "Workstation Match Up ?", wx.YES_NO | wx.ICON_INFORMATION)
-        if force_villager_typo == 2:
-            self.set_new_location(new_map_bed_and_work, location_station)
-
-        welling_map = {}
-        world_tick = self.world.level_wrapper.root_tag.get('currentTick').py_data
-
-        for did, v in poi_data.items():  # Dwellers needs to be in the same order as POI
-            welling_map[did] = {}
-            dwellers = CompoundTag(
-                {'Dwellers': ListTag([CompoundTag({'actors': ListTag([])}),
-                                      CompoundTag({'actors': ListTag([])}),
-                                      CompoundTag({'actors': ListTag([])}),
-                                      CompoundTag({'actors': ListTag([])}),
-                                      ])})
-            for uniqid in v['POI']:
-                _uid = uniqid['VillagerID'].py_data
-                d = all_actor_id_location[did][_uid]
-                dwellers['Dwellers'][0]['actors'].append(
-                    CompoundTag({
-                        'ID': LongTag(_uid),
-                        'TS': LongTag(world_tick),
-                        'last_saved_pos': ListTag([
-                            IntTag(d['Pos'][0]),
-                            IntTag(d['Pos'][1]),
-                            IntTag(d['Pos'][2]),
-                        ]),
-                        'last_worked': LongTag(world_tick),  # LongTag(world_tick-100),
-                    })
-                )
-            welling_map[did] = dwellers
-            # print(welling_map[did].to_snbt(), "welling_map")
-
-        def set_villager_info(uuid_key, bounds):
-            # print(f'b: {bounds} , id: {uuid_key}')
-            village_info = CompoundTag({
-                'BDTime': LongTag(world_tick),
-                'GDTime': LongTag(world_tick),
-                'Initialized': ByteTag(1),
-                'MTick': LongTag(0),
-                'PDTime': LongTag(world_tick),
-                'RX0': IntTag(0),
-                'RX1': IntTag(1),
-                'RY0': IntTag(0),
-                'RY1': IntTag(1),
-                'RZ0': IntTag(0),
-                'RZ1': IntTag(1),
-                'Tick': LongTag(world_tick),
-                'Version': ByteTag(1),
-                'X0': IntTag(bounds[uuid_key]['X0']),
-                'X1': IntTag(bounds[uuid_key]['X1']),
-                'Y0': IntTag(bounds[uuid_key]['Y0']),
-                'Y1': IntTag(bounds[uuid_key]['Y1']),
-                'Z0': IntTag(bounds[uuid_key]['Z0']),
-                'Z1': IntTag(bounds[uuid_key]['Z1']),
-            })
-            return village_info
-
-
-        for k, d in poi_data.items():
-            if len(k) > 5:  # Skip None String
-                info = b''.join([self.dim_village_name(), k.encode(), b'_INFO'])
-                village_key_poi = b''.join([self.dim_village_name(), k.encode(), b'_POI'])
-                players = b''.join([self.dim_village_name(), k.encode(), b'_PLAYERS'])
-                dwellers = b''.join([self.dim_village_name(), k.encode(), b'_DWELLERS'])
-                data_dwellers = welling_map[k].save_to(compressed=False, little_endian=True,
-                                                       string_encoder=utf8_escape_encoder)
-                data_players = CompoundTag(
-                    {'Players': ListTag([CompoundTag({'ID': LongTag(-4294967295), 'S': IntTag(10)})])})
-                raw_data_player = data_players.save_to(compressed=False, little_endian=True,
-                                                       string_encoder=utf8_escape_encoder)
-                data = d.save_to(compressed=False, little_endian=True, string_encoder=utf8_escape_encoder)
-                village_info = set_villager_info(k, bounds)
-                village_info_raw = village_info.save_to(compressed=False, little_endian=True,
-                                                        string_encoder=utf8_escape_encoder)
-                self.level_db.put(village_key_poi, data)
-                self.level_db.put(players, raw_data_player)
-                self.level_db.put(dwellers, data_dwellers)
-                self.level_db.put(info, village_info_raw)
         self.get_villager_locations()
-        self.list.Show()
-        self.info.SetLabel(self.info_text)  # self.info_text
 
 
     @property
@@ -4975,15 +7959,6 @@ class RemapVillagers(wx.Frame):
         else:
             return level_wrapper._level_manager._db
 
-    def get_dim_chunkkey(self, xx, zz):
-        chunkkey = b''
-        if 'minecraft:the_end' in self.canvas.dimension:
-            chunkkey = struct.pack('<iii', xx, zz, 2)
-        elif 'minecraft:the_nether' in self.canvas.dimension:
-            chunkkey = struct.pack('<iii', xx, zz, 1)
-        elif 'minecraft:overworld' in self.canvas.dimension:
-            chunkkey = struct.pack('<ii', xx, zz)
-        return chunkkey
 
 class ResetVaults():
     def __init__(self, parent, canvas, world):
@@ -5090,11 +8065,7 @@ class ChunkManager:
     def get_chunk_data(self):
         return copy.deepcopy(self.chunks)
 
-    def get_current_dim_key(self):
-        return self.current_dim_key
 
-    def set_current_dim_key(self, dim_key):
-        self.current_dim_key = dim_key
 
     def create_selection_map(self):
 
@@ -5202,8 +8173,6 @@ class ChunkManager:
         dim = self.current_dim_key
 
         new_dict = {}
-        # for ik, v in list(chunk_dict.items()):
-        #     print(ik, v )
         for ik in list(chunk_dict.keys()):
 
             if len(ik) == 10:
@@ -5211,11 +8180,10 @@ class ChunkManager:
                 new_dict[new_key + ik[8:]] = chunk_dict.pop(ik)
 
             elif 14 <= len(ik) <= 15:
-                #print(ik)
                 try:
                     new_dict[new_key][new_key + dim + ik[12:]] = chunk_dict.pop(ik)
                 except:
-                    print(f' key error ?{ik}')
+                    print(f"Could not remap Bedrock chunk key {ik!r}.")
             elif ik[-1] == 64:
                 chunk_dict.pop(ik)
             else:
@@ -5280,10 +8248,6 @@ class ChunkManager:
                     actor_nbt = load(raw, compressed=False, little_endian=True
                                      , string_decoder=utf8_escape_decoder)
                     actor_type = actor_nbt.get('identifier', StringTag()).py_str
-                    #TODO FIND THE POI
-                    # if 'minecraft:villager_v2' in actor_type:
-                    #     dwelling_unique_id = actor_nbt.get('DwellingUniqueID', StringTag()).py_data
-                    #     print(dwelling_unique_id)
                     actor_pos = actor_nbt.get('Pos')
                     actor_nbt.pop('UniqueID')
                     actor_nbt.pop('internalComponents')
@@ -5600,8 +8564,6 @@ class ChunkManager:
                                 if not (_min <= them <= _max):
                                     new_be.pop(them, None)
 
-                            # new_selection_ready = {**old_sections, **new_selection}
-                            # new_be_ready = {**new_be, **old_be}
 
                             new_selection_ready = old_sections.copy()
                             for k, v in new_selection.items():
@@ -5612,7 +8574,6 @@ class ChunkManager:
                                 new_be_ready[k] = v
 
                             data['block_entities'] = ListTag([c for c in new_be_ready.values()])
-                            # TODO add check box
                             data['sections'] = ListTag([c for c in new_selection_ready.values()])
 
                             data['DataVersion'] = IntTag(2860)
@@ -5720,10 +8681,10 @@ class ChunkManager:
 
 class ChunkSaveAndLoad(wx.Frame):
     def __init__(self, parent, canvas, world):
-        super().__init__(parent, id=wx.ID_ANY, pos=wx.DefaultPosition, size=(560, 400), title="Position selections",
+        super().__init__(parent, id=wx.ID_ANY, pos=wx.DefaultPosition, title="Chunk Save / Load Tool",
                          style=(
                                  wx.MINIMIZE_BOX | wx.MAXIMIZE_BOX | wx.RESIZE_BORDER | wx.SYSTEM_MENU | wx.CAPTION | wx.CLOSE_BOX |
-                                 wx.CLIP_CHILDREN | wx.FRAME_FLOAT_ON_PARENT | wx.ALIGN_CENTER | wx.STAY_ON_TOP))
+                                 wx.CLIP_CHILDREN | wx.FRAME_FLOAT_ON_PARENT | wx.ALIGN_CENTER))
         self.parent = parent
 
         self.canvas = canvas
@@ -5740,8 +8701,10 @@ class ChunkSaveAndLoad(wx.Frame):
         self.SetFont(self.font)
         self.SetForegroundColour((0, 255, 0))
         self.SetBackgroundColour((0, 0, 0))
-        self.info_label = wx.StaticText(self, label="\nThis Directly edited the world ! "
-                                                    "\n                     Make sure you have a backup! ")
+        self.info_label = wx.StaticText(
+            self,
+            label="This directly edits the world. Make sure you have a backup."
+        )
 
         self._all_chunks = wx.CheckBox(self, label="Save: All Chunks \n (can be slow)")
         self._all_chunks.SetValue(False)
@@ -5757,7 +8720,7 @@ class ChunkSaveAndLoad(wx.Frame):
         self._load_button = wx.Button(self, label="Load Chunks")
         self._load_button.Bind(wx.EVT_BUTTON, self.load_chunks)
 
-        self._move_chunks_into_view = wx.Button(self, label="Move Loaded Chunks \nInto Camera View", size=(180, 20))
+        self._move_chunks_into_view = wx.Button(self, label="Move Loaded Chunks \nInto Camera View", size=self.FromDIP(wx.Size(180, 32)))
         self._go_to_loaded = wx.Button(self, label="Go to loaded chunks")
         self._move_grid = wx.GridSizer(3, 3, 2, 1)
         self._move_n = wx.Button(self, label="North")
@@ -5787,11 +8750,11 @@ class ChunkSaveAndLoad(wx.Frame):
         self.grid_for_outer = wx.GridSizer(2, 2, 5, 3)
         self._select_outer_l = wx.StaticText(self, label="  Outer select / delete range:\n"
                                                          "(This is required for blending)")
-        self._select_outer_in = wx.TextCtrl(self, size=(40, 35))
+        self._select_outer_in = wx.TextCtrl(self, size=self.FromDIP(wx.Size(40, 35)))
         self._select_outer_in.SetValue('2')
-        self._select_outer = wx.Button(self, label="Select Outer\n Chunks", size=(100, 35))
+        self._select_outer = wx.Button(self, label="Select Outer\n Chunks", size=self.FromDIP(wx.Size(100, 35)))
         self._select_outer.Bind(wx.EVT_BUTTON, self.chunks_mg.select_outer)
-        self._delete_outer = wx.Button(self, label="Delete Outer\n Chunks", size=(100, 35))
+        self._delete_outer = wx.Button(self, label="Delete Outer\n Chunks", size=self.FromDIP(wx.Size(100, 35)))
         self._delete_outer.Bind(wx.EVT_BUTTON, self.chunks_mg.delete_outer)
 
         self.grid_for_outer.Add(self._select_outer_l)
@@ -5806,8 +8769,8 @@ class ChunkSaveAndLoad(wx.Frame):
         self.l_range_Info = wx.StaticText(self, label="overworld=24, end=16, nether=8, Sub chunk is 16x16x16 \n"
                                                       "overworld range is -4 to 19, nether is 0 to 7 end is 0 to 15 ")
 
-        self._range_bottom = wx.TextCtrl(self, size=(40, 20))
-        self._range_top = wx.TextCtrl(self, size=(40, 20))
+        self._range_bottom = wx.TextCtrl(self, size=self.FromDIP(wx.Size(40, 26)))
+        self._range_top = wx.TextCtrl(self, size=self.FromDIP(wx.Size(40, 26)))
         self._range_grid = wx.GridSizer(1, 4, 2, 0)
         self._range_grid.Add(self.l_min)
         self._range_grid.Add(self._range_bottom)
@@ -5832,10 +8795,10 @@ class ChunkSaveAndLoad(wx.Frame):
         self._save_load_grid.Add(self._all_chunks)
         self._save_load_grid.Add(self._load_button)
 
-        self.main_sizer.Add(self.info_label, 1, wx.LEFT, 0)
-        self.main_sizer.Add(self._save_load_grid, 1, wx.LEFT, 0)
+        padding = self.FromDIP(6)
+        self.main_sizer.Add(self.info_label, 0, wx.ALL, padding)
+        self.main_sizer.Add(self._save_load_grid, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, padding)
 
-        # self.main_sizer.Add(self._load_button, 0, wx.LEFT, 11)
 
         self.loaded_sizer.Add(self._move_chunks_into_view, 1, wx.TOP, 0)
         self.loaded_sizer.Add(self._box_l_and_toggle, 0, wx.LEFT, 0)
@@ -5876,7 +8839,6 @@ class ChunkSaveAndLoad(wx.Frame):
             self.canvas.camera.projection_mode = Projection.TOP_DOWN
 
     def load_chunks(self, _):
-        # self.chunks_mg = ChunkManager(parent=self, world=self.world, canvas=self.canvas)
         platf = self.world.level_wrapper.platform
         fdlg = wx.FileDialog(self.parent, "Load chunks", "", "",
                              f"Chunk (*.chunks_{platf})|*.chunks_{platf}", wx.FD_OPEN)
@@ -6242,7 +9204,6 @@ class SmallEditDialog(wx.Frame):
         self.value_field.ChangeValue(str(self.data_type_func(tag_value)))
 
     def change_tag_type_func(self, tag_type, name_value=[False, False]):
-        # self.data_type_func = lambda x: x
         if name_value[0]:
             self.name_field.Disable()
         if name_value[1]:
@@ -6282,12 +9243,10 @@ class SmallEditDialog(wx.Frame):
 
 class NBTEditor(wx.Panel):
     def __init__(self, parent, nbt_data=CompoundTag(), root_tag_name="", callback=None, ):
-        # super(NBTEditor, self).__init__(parent)
         # Use the WANTS_CHARS style so the panel doesn't eat the Return key.
         wx.Panel.__init__(self, parent)
         self.sizer = wx.BoxSizer(wx.HORIZONTAL)
         self.SetSizer(self.sizer)
-        #  self.SetSize(600, 650)
         self.nbt_new = CompoundTag()
         self.nbt_data = nbt_data
         self.copy_data = None
@@ -6324,44 +9283,6 @@ class NBTEditor(wx.Panel):
     def build_to(self, evt, opt='raw'):
         tree = self.tree
 
-        # def get_full_path(child):
-        #     index = 0
-        #     p_type = None
-        #     the_sib_items = []
-        #     nbt_path_keys = []
-        #     if isinstance(tree.GetItemData(child), tuple):
-        #         name, data = tree.GetItemData(child)
-        #         nbt_path_keys.append(name)
-        #     sibl = tree.GetItemParent(child)
-        #     while sibl.IsOk():
-        #         # print("____",tree.GetItemData(sibl))
-        #         the_sib_items.append(sibl)
-        #         if isinstance(tree.GetItemData(sibl), tuple):
-        #             p_type = tree.GetItemData(sibl)[1]
-        #         else:
-        #             p_type = tree.GetItemData(sibl)
-        #         print(root_path(tree.GetFocusedItem()))
-        #         if p_type == ListTag:
-        #             item_num = tree.GetChildrenCount(sibl, recursively=True)
-        #             f_child, f_c = tree.GetFirstChild(sibl)
-        #             f_item = tree.GetFocusedItem()
-        #             if f_child.IsOk():
-        #                 for c in range(item_num):
-        #                     if f_child.IsOk():
-        #
-        #                         if f_child == f_item:
-        #                             index = c
-        #                             break
-        #                         f_child, f_c = tree.GetNextChild(f_child, f_c)
-        #
-        #             nbt_path_keys.append(index)
-        #         if isinstance(tree.GetItemData(sibl), tuple):
-        #             nname, ddata = tree.GetItemData(sibl)
-        #             nbt_path_keys.append(nname)
-        #         sibl = tree.GetItemParent(sibl)
-        #     nbt_path_keys.reverse()
-        #
-        #     return nbt_path_keys[1:]
 
         def root_path(child):
             nbt_path_keys = []
@@ -6486,7 +9407,6 @@ class NBTEditor(wx.Panel):
         if opt == 'snbt':
             f_item = self.tree.GetFocusedItem()
             #
-            # i_par = self.tree.GetItemParent(f_item)
             #
 
             root_tree = self.tree.GetRootItem()
@@ -6494,7 +9414,6 @@ class NBTEditor(wx.Panel):
             t_path = root_path(f_item)
 
             selected_nbt = get_real_nbt(self.nbt_new, t_path)
-            # self.nbt_new.save_to(r"C:\Users\drthe\AppData\Local\Packages\Microsoft.MinecraftUWP_8wekyb3d8bbwe\LocalState\games\com.mojang\minecraftWorlds\wNOGYzAFAQA=\Test.nbt", compressed=False , little_endian=True)
             if hasattr(selected_nbt, 'items'):
                 tsnbt = []
                 for k, v in selected_nbt.items():
@@ -6610,9 +9529,7 @@ class NBTEditor(wx.Panel):
         add_tree_node(tree, root, self.nbt_data)
         tree.Expand(root)
         tree.Bind(wx.EVT_TREE_ITEM_RIGHT_CLICK, self.tree_right_click)
-        # tree.Bind(wx.EVT_LEFT_DOWN, self.tree_leftDC_click)
         tree.Bind(wx.EVT_LEFT_UP, self.tree_leftDC_click)
-        # self.tree = self.build_tree(data)
         self.sizer.Add(tree, 1, wx.ALL | wx.CENTER | wx.EXPAND)
         tree.Bind(wx.EVT_LEFT_DCLICK, self.OnLeftDClick)
         tree.Bind(wx.EVT_RIGHT_DOWN, self.OnRightDown)
@@ -6653,7 +9570,7 @@ class NBTEditor(wx.Panel):
                 pass
             self.edit_dialog = SmallEditDialog(self, "Edit", self.has_list_type, item, self.tree, icon, self.image_map)
             style = self.edit_dialog.GetWindowStyle()
-            self.edit_dialog.SetWindowStyle(style | wx.STAY_ON_TOP)
+            self.edit_dialog.SetWindowStyle(style | wx.FRAME_FLOAT_ON_PARENT)
             self.edit_dialog.Show()
 
         evt.Skip()
@@ -6725,7 +9642,7 @@ class NBTEditor(wx.Panel):
                 self.edit_dialog = SmallEditDialog(self, "Add", self.has_list_type, item, self.tree, icon,
                                                    self.image_map)
                 style = self.edit_dialog.GetWindowStyle()
-                self.edit_dialog.SetWindowStyle(style | wx.STAY_ON_TOP)
+                self.edit_dialog.SetWindowStyle(style | wx.FRAME_FLOAT_ON_PARENT)
                 self.edit_dialog.Show()
 
         elif op_name == "copy":
@@ -6745,7 +9662,7 @@ class NBTEditor(wx.Panel):
             self.edit_dialog = SmallEditDialog(self, "Edit_As", "SNBT", item, self.tree, None,
                                                self.image_map)
             style = self.edit_dialog.GetWindowStyle()
-            self.edit_dialog.SetWindowStyle(style | wx.STAY_ON_TOP)
+            self.edit_dialog.SetWindowStyle(style | wx.FRAME_FLOAT_ON_PARENT)
             self.edit_dialog.Show()
 
         elif op_name == "edit":
@@ -6774,7 +9691,7 @@ class NBTEditor(wx.Panel):
             self.edit_dialog = SmallEditDialog(self, "Edit", self.has_list_type, item, self.tree, icon,
                                                self.image_map)
             style = self.edit_dialog.GetWindowStyle()
-            self.edit_dialog.SetWindowStyle(style | wx.STAY_ON_TOP)
+            self.edit_dialog.SetWindowStyle(style | wx.FRAME_FLOAT_ON_PARENT)
             self.edit_dialog.Show()
 
         elif op_name == "delete":
@@ -6786,7 +9703,7 @@ class NBTEditor(wx.Panel):
                 name, data = self.tree.GetItemData(selected_tag)
                 edit_dialog = SmallEditDialog(self, op_name, data, selected_tag, self.tree, None)
                 style = self.edit_dialog.GetWindowStyle()
-                edit_dialog.SetWindowStyle(style | wx.STAY_ON_TOP)  ###
+                edit_dialog.SetWindowStyle(style | wx.FRAME_FLOAT_ON_PARENT)  ###
                 edit_dialog.Show()
 
     def _generate_menu(self, include_add_tag=False):
@@ -6898,7 +9815,7 @@ class NBTEditor(wx.Panel):
         self.dragItem = event.GetItem()
 
     def OnEndDrag(self, event):
-        # If we dropped somewhere that isn't on top of an item, ignore the event
+        # Ignore drops that do not land on a valid tree item.
         if event.GetItem().IsOk():
             target = event.GetItem()
         else:
@@ -6946,7 +9863,6 @@ class NBTEditor(wx.Panel):
             save = self.tree.SaveItemsToList(source)
             self.tree.Delete(source)
             newitems = self.tree.InsertItemsFromList(save, target)
-            # self.tree.UnselectAll()
             for item in newitems:
                 self.tree.SelectItem(item)
 
@@ -6968,12 +9884,6 @@ class NBTEditor(wx.Panel):
             else:
                 MoveHere(None)
 
-    # def OnRightUp(self, event):
-    #     pt = event.GetPosition();
-    #     item, flags = self.tree.HitTest(pt)
-    #
-    #     #self.tree.EditLabel(item)
-    #     print(item)
 
     def OnLeftDown(self, event):
         print
@@ -7001,7 +9911,6 @@ class NBTEditor(wx.Panel):
         self.tree.Toggle(item)
         print
         "toggled ", item
-        # event.Skip()
 
     def OnSize(self, event):
         w, h = self.GetClientSize()
@@ -7009,90 +9918,144 @@ class NBTEditor(wx.Panel):
 
 class Inventory(wx.Frame):
     def __init__(self, parent, canvas, world, *args, **kw):
-        super(Inventory, self).__init__(parent, *args, **kw,
-                                        style=(wx.MINIMIZE_BOX | wx.MAXIMIZE_BOX | wx.RESIZE_BORDER |
-                                               wx.SYSTEM_MENU | wx.CAPTION | wx.CLOSE_BOX | wx.CLIP_CHILDREN |
-                                               wx.FRAME_FLOAT_ON_PARENT),
-                                        title="NBT Editor For Player Inventory")
+        super(Inventory, self).__init__(
+            parent,
+            *args,
+            **kw,
+            style=(
+                wx.MINIMIZE_BOX
+                | wx.MAXIMIZE_BOX
+                | wx.RESIZE_BORDER
+                | wx.SYSTEM_MENU
+                | wx.CAPTION
+                | wx.CLOSE_BOX
+                | wx.CLIP_CHILDREN
+                | wx.FRAME_FLOAT_ON_PARENT
+            ),
+            title="NBT Editor for Inventory",
+        )
 
         self.parent = parent
-
         self.canvas = canvas
         self.world = world
         self.platform = self.world.level_wrapper.platform
-        self.font = wx.Font(13, wx.FONTFAMILY_ROMAN, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL)
-        self.SetForegroundColour((0, 255, 0))
-        self.SetBackgroundColour((0, 0, 0))
-        self.SetFont(self.font)
-        self.SetMinSize((520, 800))
         self.storage_key = CompoundTag()
         self.Freeze()
 
+        self.font = wx.Font(
+            11,
+            wx.FONTFAMILY_ROMAN,
+            wx.FONTSTYLE_NORMAL,
+            wx.FONTWEIGHT_NORMAL,
+        )
+        self.SetFont(self.font)
+        self.SetForegroundColour((0, 255, 0))
+        self.SetBackgroundColour((0, 0, 0))
+
+        self._content_pad = self.FromDIP(6)
         self._sizer = wx.BoxSizer(wx.VERTICAL)
         self.SetSizer(self._sizer)
 
-        self.font = wx.Font(11, wx.FONTFAMILY_ROMAN, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL)
-        self.top_sizer = wx.BoxSizer(wx.VERTICAL)
+        # Other methods access these named sizers when updating the layout.
+        self.top_sizer = wx.BoxSizer(wx.HORIZONTAL)
         self.side_sizer = wx.BoxSizer(wx.HORIZONTAL)
         self.bottom_sizer = wx.BoxSizer(wx.HORIZONTAL)
 
-        self._sizer.Add(self.side_sizer, 1, wx.TOP | wx.LEFT, 0)
-        self._sizer.Add(self.top_sizer)
-        self._sizer.Add(self.bottom_sizer, 1, wx.BOTTOM | wx.LEFT, 2)
         self.items = wx.Choice(self, choices=[])
         self.items.Bind(wx.EVT_CHOICE, self.on_item_focus)
 
-        self.info_list = wx.StaticText(self, label=" ")  # just a hack to force width
-        self.top_sizer.Add(self.info_list, 0, wx.LEFT, 450)
+        if self.world.level_wrapper.platform == "bedrock":
+            self._structlist = wx.Choice(self, choices=self._run_get_slist())
+            self._structlist.Bind(wx.EVT_CHOICE, self.onFocus)
+            self._structlist.SetSelection(0)
+        else:
+            self._structlist = wx.Choice(self, choices=[])
+            self._structlist.Bind(wx.EVT_CHOICE, self.onFocus)
+            self.java_setup()
+            self._structlist.SetSelection(0)
 
-        self.blank = wx.StaticText(self, label="")
+        player_label = wx.StaticText(self, label="Player:")
+        data_label = wx.StaticText(self, label="Data:")
+        self.top_sizer.Add(player_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, self._content_pad)
+        self.top_sizer.Add(self._structlist, 1, wx.RIGHT, self._content_pad * 2)
+        self.top_sizer.Add(data_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, self._content_pad)
+        self.top_sizer.Add(self.items, 1)
+        self._sizer.Add(
+            self.top_sizer,
+            0,
+            wx.EXPAND | wx.ALL,
+            self._content_pad,
+        )
+
         self.save_player_data_button = wx.Button(self, label="Save Player")
         self.save_player_snbt_button = wx.Button(self, label="Save File")
         self.remove_player_btn = wx.Button(self, label="Remove Player")
-        self.load_file_grid = wx.GridSizer(2, 1, 0, -0)
         self.load_player_snbt = wx.Button(self, label="Load File")
-        self.load_player_snbt_info = wx.StaticText(self,
-                                                   label="NOTE : \nWhen loading file make sure to select what \n was select from the dropdown when you saved.")
-        self.load_file_grid.Add(self.load_player_snbt)
-        self.load_file_grid.Add(self.load_player_snbt_info)
 
         self.save_player_data_button.Bind(wx.EVT_BUTTON, self.save_player_data)
         self.save_player_snbt_button.Bind(wx.EVT_BUTTON, self.export_snbt)
         self.load_player_snbt.Bind(wx.EVT_BUTTON, self.import_snbt)
         self.remove_player_btn.Bind(wx.EVT_BUTTON, self.remove_player)
 
-        self.the_grid = wx.GridSizer(3, 3, -60, -130)
+        for button in (
+            self.save_player_snbt_button,
+            self.load_player_snbt,
+            self.save_player_data_button,
+            self.remove_player_btn,
+        ):
+            self.bottom_sizer.Add(button, 1, wx.RIGHT, self._content_pad)
+        self._sizer.Add(
+            self.bottom_sizer,
+            0,
+            wx.EXPAND | wx.LEFT | wx.RIGHT,
+            self._content_pad,
+        )
 
-        self.the_grid.Add(self.save_player_snbt_button)
-        self.the_grid.Add(self.items, 0, wx.LEFT, -10)
-        self.the_grid.Add(self.remove_player_btn, 0, wx.LEFT, 30)
-        self.the_grid.Add(self.load_file_grid)
-        self.the_grid.Add(self.blank)
-        self.the_grid.Add(self.save_player_data_button, 0, wx.LEFT, 30)
-        self.bottom_sizer.Add(self.the_grid)
+        self.load_player_snbt_info = wx.StaticText(
+            self,
+            label=(
+                "Note: When loading a file, select the same data category "
+                "that was selected when the file was saved."
+            ),
+        )
+        self.load_player_snbt_info.Wrap(self.FromDIP(430))
+        self._sizer.Add(
+            self.load_player_snbt_info,
+            0,
+            wx.EXPAND | wx.ALL,
+            self._content_pad,
+        )
+
+        # Retained for compatibility with older code paths, but no longer used
+        # as layout spacers.
+        self.info_list = wx.StaticText(self, label="")
+        self.info_list.Hide()
+        self.blank = wx.StaticText(self, label="")
+        self.blank.Hide()
+        self.load_file_grid = wx.BoxSizer(wx.VERTICAL)
+        self.the_grid = wx.BoxSizer(wx.VERTICAL)
+
         self.nbt_editor_instance = NBTEditor(self)
-
-        self._sizer.Add(self.nbt_editor_instance, 130, wx.EXPAND, 51)
-        if self.world.level_wrapper.platform == "bedrock":
-            self._structlist = wx.Choice(self, choices=self._run_get_slist())
-            self._structlist.Bind(wx.EVT_CHOICE, self.onFocus)
-            self._structlist.SetSelection(0)
-        else:
-            self._structlist = wx.Choice(self, choices=[])  # self._run_get_slist())
-            self._structlist.Bind(wx.EVT_CHOICE, self.onFocus)
-            self.java_setup()
-            self._structlist.SetSelection(0)
         self.nbt_editor_instance.SetBackgroundColour((0, 0, 0))
         self.nbt_editor_instance.SetForegroundColour((0, 255, 0))
         self.nbt_editor_instance.SetFont(self.font)
+        self._sizer.Add(
+            self.nbt_editor_instance,
+            1,
+            wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM,
+            self._content_pad,
+        )
 
-        self.nbt_editor_instance.Fit()
-
-        self.top_sizer.Add(self._structlist, 0, wx.LEFT, 11)
         if self.world.level_wrapper.platform == "bedrock":
             self.get_player_data()
+
+        self.SetMinSize(self.FromDIP(wx.Size(500, 350)))
+        # Give the NBT tree a stable initial viewport before the first move.
+        self.SetClientSize(self.FromDIP(wx.Size(680, 480)))
         self.Layout()
         self.Thaw()
+        self.CentreOnParent()
+        _clamp_window_to_display(self)
 
     def on_item_focus(self, _):
         selcted = self.items.GetStringSelection()
@@ -7106,7 +10069,7 @@ class Inventory(wx.Frame):
                 self.nbt_editor_instance = NBTEditor(self, self.nbt_dic_list)
             else:
                 self.nbt_editor_instance = NBTEditor(self, CompoundTag({selcted: self.nbt_dic_list[selcted]}))
-            self._sizer.Add(self.nbt_editor_instance, 130, wx.EXPAND, 21)
+            self._sizer.Add(self.nbt_editor_instance, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, self._content_pad)
             self.Layout()
             self.Thaw()
         else:
@@ -7115,7 +10078,7 @@ class Inventory(wx.Frame):
             self.nbt_editor_instance.Hide()
             NBTEditor.close(self.nbt_editor_instance, None, self.GetParent())
             self.nbt_editor_instance = NBTEditor(self, CompoundTag({selcted: self.nbt_dic_list[selcted]}))
-            self._sizer.Add(self.nbt_editor_instance, 130, wx.EXPAND, 21)
+            self._sizer.Add(self.nbt_editor_instance, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, self._content_pad)
             self.Layout()
             self.Thaw()
 
@@ -7146,25 +10109,16 @@ class Inventory(wx.Frame):
                 first_c, c = self.nbt_editor_instance.tree.GetFirstChild(root)
 
                 self.nbt_editor_instance.tree.Expand(first_c)
-                self._sizer.Add(self.nbt_editor_instance, 130, wx.EXPAND, 21)
+                self._sizer.Add(self.nbt_editor_instance, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, self._content_pad)
                 self.Layout()
 
-                # self.nbt_editor_instance.SetValue(self.nbt_dic_list.get('Inventory'))
 
-    def _run_set_data(self, _):
-        player = self.level_db.get(b'~local_player')
-        data = self.nbt_editor_instance.GetValue()
-        nnbt = from_snbt(data)
-
-        data2 = nsave_to(compressed=False, little_endian=True)
-        self.level_db.put(b'~local_player', data2)
 
     def update_player_data(self, new_data):
         self_ = self.Parent.Parent
         seleted_ = self_.items.GetStringSelection()
 
         save_expanded = []
-        # self.Freeze()
         f_root = self_.nbt_editor_instance.tree.GetRootItem()
 
         r_c = self_.nbt_editor_instance.tree.GetChildrenCount(f_root, 0)
@@ -7236,7 +10190,6 @@ class Inventory(wx.Frame):
             return nbt_path_keys[1:]
 
         def recurtree(item):
-            # for c in range(r_c):
             if item.IsOk():
                 i_c = self_.nbt_editor_instance.tree.GetChildrenCount(item, recursively=True)
                 f_ic, cc_i = self_.nbt_editor_instance.tree.GetFirstChild(item)
@@ -7279,17 +10232,16 @@ class Inventory(wx.Frame):
 
         self_.nbt_editor_instance.tree.Expand(first_c)
         re_expand(root)
-        self_._sizer.Add(self_.nbt_editor_instance, 130, wx.EXPAND, 21)
+        self_._sizer.Add(self_.nbt_editor_instance, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, self_._content_pad)
         self_.nbt_editor_instance.tree.SetScrollPos(wx.VERTICAL, current_scr_h)
         self_.Layout()
         self_.Thaw()
         self.Close()
 
-        # self.nbt_editor_instance.SetValue(self.nbt_dic_list["Inventory"].to_snbt(1))
 
     def get_player_data(self):
 
-        setdata = self._structlist.GetStringSelection()  # self._structlist.GetString(self._structlist.GetSelection())
+        setdata = self._structlist.GetStringSelection()
         enS = setdata.encode("utf-8")
         try:
             player = self.level_db.get(enS).replace(b'\x08\n\x00StorageKey\x08\x00',
@@ -7309,10 +10261,9 @@ class Inventory(wx.Frame):
             first_c, c = self.nbt_editor_instance.tree.GetFirstChild(root)
 
             self.nbt_editor_instance.tree.Expand(first_c)
-            self._sizer.Add(self.nbt_editor_instance, 130, wx.EXPAND, 21)
+            self._sizer.Add(self.nbt_editor_instance, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, self._content_pad)
             self.Layout()
             self.Thaw()
-            # self.nbt_editor_instance.SetValue(self.nbt_dic_list["Inventory"].to_snbt(1))
         except:
             self.Onmsgbox("Cant Find Local Player", "Open locally In Minecraft to regenerate the player.")
 
@@ -7374,19 +10325,15 @@ class Inventory(wx.Frame):
             else:
                 pathname = fileDialog.GetPath()
         data = load(pathname, little_endian=True, compressed=False).compound
-        # print(type(data.compound),len(data.compound))
-        # self.nbt_editor_instance.sizer.Hide(self.nbt_editor_instance.tree)
-        # self.nbt_editor_instance.tree.DeleteAllItems()
         self.Freeze()
         self._sizer.Detach(self.nbt_editor_instance)
         self.nbt_editor_instance.Hide()
         NBTEditor.close(self.nbt_editor_instance, None, self.GetParent())
         self.nbt_editor_instance = NBTEditor(self, data)
-        self._sizer.Add(self.nbt_editor_instance, 130, wx.EXPAND, 21)
+        self._sizer.Add(self.nbt_editor_instance, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, self._content_pad)
         self.Layout()
         self.Thaw()
 
-        # self.nbt_editor_instance.build_tree(self, data)
 
     def remove_player(self, _):
         if self.world.level_wrapper.platform == "bedrock":
@@ -7452,7 +10399,7 @@ class Inventory(wx.Frame):
                 first_c, c = self.nbt_editor_instance.tree.GetFirstChild(root)
 
                 self.nbt_editor_instance.tree.Expand(first_c)
-                self._sizer.Add(self.nbt_editor_instance, 130, wx.EXPAND, 21)
+                self._sizer.Add(self.nbt_editor_instance, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, self._content_pad)
                 self.Layout()
                 self.Thaw()
                 ##################################################################################################
@@ -7480,7 +10427,7 @@ class RandomFiller(wx.Frame):
                                            style=(wx.MINIMIZE_BOX | wx.MAXIMIZE_BOX | wx.RESIZE_BORDER |
                                                   wx.SYSTEM_MENU | wx.CAPTION | wx.CLOSE_BOX | wx.CLIP_CHILDREN |
                                                   wx.FRAME_FLOAT_ON_PARENT),
-                                           title="NBT Editor for Entities")
+                                           title="Random Filler")
         self.parent = parent
         self.canvas = canvas
         self.world = world
@@ -7489,16 +10436,19 @@ class RandomFiller(wx.Frame):
         self.SetForegroundColour((0, 255, 0))
         self.SetBackgroundColour((0, 0, 0))
         self.SetFont(self.font)
-        self.SetMinSize((520, 720))
+        pad = self.FromDIP(6)
+        self.SetMinClientSize(self.FromDIP(wx.Size(540, 310)))
         self.toggle = True
         self.Freeze()
         self.arr = {}
         self._sizer = wx.BoxSizer(wx.VERTICAL)
         self.SetSizer(self._sizer)
         self.saveload = wx.BoxSizer(wx.HORIZONTAL)
-        self._sizer.Add(self.saveload, 0, wx.TOP, 5)
-        self.replace_list_txt = wx.TextCtrl(self, style=wx.TE_MULTILINE | wx.TE_BESTWRAP, size=(322, 300))
-        self.keep_list_txt = wx.TextCtrl(self, style=wx.TE_MULTILINE | wx.TE_BESTWRAP, size=(322, 300))
+        self._sizer.Add(self.saveload, 0, wx.EXPAND | wx.ALL, pad)
+        self.replace_list_txt = wx.TextCtrl(self, style=wx.TE_MULTILINE | wx.TE_BESTWRAP,
+                                            size=self.FromDIP(wx.Size(245, 215)))
+        self.keep_list_txt = wx.TextCtrl(self, style=wx.TE_MULTILINE | wx.TE_BESTWRAP,
+                                         size=self.FromDIP(wx.Size(245, 215)))
         self.replace = wx.CheckBox(self, label="Replace Blocks Mode( default fill )")
         self._run_buttonA = wx.Button(self, label="Apply")
         self._run_buttonA.Bind(wx.EVT_BUTTON, self._apply_changes)
@@ -7509,18 +10459,21 @@ class RandomFiller(wx.Frame):
         self.open_block_window = wx.Button(self, label="Select Blocks")
         self.open_block_window.Bind(wx.EVT_BUTTON, self.block_list)
 
-        self.saveload.Add(self.replace, 0, wx.LEFT, 0)
+        self.saveload.Add(self.replace, 0, wx.ALIGN_CENTER_VERTICAL)
+        self.saveload.AddStretchSpacer()
+        self.saveload.Add(self._run_buttonA, 0, wx.ALIGN_CENTER_VERTICAL)
 
-        self.saveload.Add(self._run_buttonA, 10, wx.LEFT, 40)
+        self._sizer.Add(self.open_block_window, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, pad)
+        lists = wx.BoxSizer(wx.HORIZONTAL)
+        for label, editor in ((self._replace_label, self.replace_list_txt),
+                              (self._keep_label, self.keep_list_txt)):
+            column = wx.BoxSizer(wx.VERTICAL)
+            column.Add(label, 0, wx.BOTTOM, pad)
+            column.Add(editor, 1, wx.EXPAND)
+            lists.Add(column, 1, wx.EXPAND | (wx.RIGHT if editor is self.replace_list_txt else 0), pad)
+        self._sizer.Add(lists, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, pad)
 
-        self._sizer.Add(self.open_block_window, 0, wx.LEFT, 90)
-        self._sizer.Add(self._replace_label)
-        self._sizer.Add(self.replace_list_txt)
-        self._sizer.Add(self._keep_label)
-        self._sizer.Add(self.keep_list_txt)
-
-        self.saveload.Fit(self)
-        self._sizer.Fit(self)
+        self.SetClientSize(self.FromDIP(wx.Size(640, 380)))
         self.toggle_count = 0
         self.Layout()
         self.Thaw()
@@ -7530,7 +10483,7 @@ class RandomFiller(wx.Frame):
         x, y, z = self.canvas.selection.selection_group.min
         block, enty = self.world.get_version_block(x, y, z, self.canvas.dimension,
                                                    (self.world.level_wrapper.platform,
-                                                    self.world.level_wrapper.version))  # self.canvas.selection.selection_group.min
+                                                    self.world.level_wrapper.version))
 
         the_snbt = f"{block.namespaced_name}" \
                    f"\n{CompoundTag(block.properties).to_snbt(1)}"
@@ -7558,13 +10511,10 @@ class RandomFiller(wx.Frame):
 
     def block_list(self, _):
         self.window = wx.Frame(self.parent, title="Add Blocks", size=(550, 570),
-                               style=wx.DEFAULT_FRAME_STYLE | wx.STAY_ON_TOP)
+                               style=_float_on_parent_style())
         self.window.Centre()
         self.w_sizer = wx.BoxSizer(wx.HORIZONTAL)
         self.window.SetSizer(self.w_sizer)
-        # if self.univeral_mode.GetValue():
-        #     self.chosen_platform = "universal"
-        #     self.chosen_name_space = "universal_minecraft"
         if True:
             self.chosen_platform = self.world.level_wrapper.platform
             self.chosen_name_space = "minecraft"
@@ -7573,7 +10523,6 @@ class RandomFiller(wx.Frame):
             self.world.translation_manager,
             wx.VERTICAL,
             force_blockstate=False,
-            # platform="universal",
             namespace=self.chosen_name_space,
             *([self.chosen_platform]),
             # *(self.options.get("fill_block_options", []) or [self.world.level_wrapper.platform]),
@@ -7742,7 +10691,7 @@ class ShapePainter(wx.Frame):
                                            style=(wx.MINIMIZE_BOX | wx.MAXIMIZE_BOX | wx.RESIZE_BORDER |
                                                   wx.SYSTEM_MENU | wx.CAPTION | wx.CLOSE_BOX | wx.CLIP_CHILDREN |
                                                   wx.FRAME_FLOAT_ON_PARENT),
-                                           title="NBT Editor for Entities")
+                                           title="Shape Painter")
         self.parent = parent
         self.canvas = canvas
         self.world = world
@@ -7751,7 +10700,8 @@ class ShapePainter(wx.Frame):
         self.SetForegroundColour((0, 255, 0))
         self.SetBackgroundColour((0, 0, 0))
         self.SetFont(self.font)
-        self.SetMinSize((520, 720))
+        pad = self.FromDIP(6)
+        self.SetMinClientSize(self.FromDIP(wx.Size(520, 590)))
         self.Freeze()
         self._is_enabled = True
         self._moving = True
@@ -7763,24 +10713,25 @@ class ShapePainter(wx.Frame):
             self.world.translation_manager,
             wx.VERTICAL,
             force_blockstate=False,
-            # platform="universal",
             namespace='minecraft',
             *([self.world.level_wrapper.platform]),
             show_pick_block=False
         )
         self.options_sizer = wx.BoxSizer(wx.VERTICAL)
-        self.bot_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        self.bot_sizer = wx.FlexGridSizer(2, 2, pad, pad)
+        self.bot_sizer.AddGrowableCol(0, 1)
+        self.bot_sizer.AddGrowableCol(1, 1)
         self.move_boxs_sizer = wx.BoxSizer(wx.HORIZONTAL)
         self.font = wx.Font(16, wx.FONTFAMILY_ROMAN, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL)
 
         self.staus_pause_pointer = wx.StaticText(self, label="Press P To Pause Pointer")
         self.staus_pause_pointer.SetFont(self.font)
         self.staus_pause_pointer.SetForegroundColour((11, 220, 11))
-        self._sizer.Add(self.options_sizer, 1, wx.ALL, 0)
-        self._sizer.Add(self.bot_sizer, 0, wx.BOTTOM | wx.LEFT, 0)
-        self._sizer.Add(self.staus_pause_pointer, 0, wx.BOTTOM | wx.LEFT, 0)
-        self._sizer.Add(self.move_boxs_sizer, 25, wx.EXPAND | wx.LEFT | wx.RIGHT, 0)
-        self._sizer.Add(self._block_define, 25, wx.EXPAND | wx.LEFT | wx.RIGHT, 0)
+        self._sizer.Add(self.options_sizer, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
+        self._sizer.Add(self.bot_sizer, 0, wx.EXPAND | wx.ALL, pad)
+        self._sizer.Add(self.staus_pause_pointer, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, pad)
+        self._sizer.Add(self.move_boxs_sizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, pad)
+        self._sizer.Add(self._block_define, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, pad)
 
         self._up = wx.Button(self, label="Up", size=(36, 35))
         self._up.Bind(wx.EVT_BUTTON, self._boxUp('m'))
@@ -7797,34 +10748,35 @@ class ShapePainter(wx.Frame):
 
         brush_option = ["Circle", "Diamond", "Square", "Pyramid Up", "Pyramid Down", 'Dome', "bowl", 'walls', "tunnel"]
 
-        self.options = CustomRadioBox(self, 'Brush Type', brush_option, (0, 255, 0), sty=wx.RA_SPECIFY_COLS, md=3)
+        self.options = CustomRadioBox(self, 'Brush Type', brush_option, (0, 255, 0),
+                                      sty=wx.RA_SPECIFY_COLS, md=2)
 
-        self.options_sizer.Add(self.options)
+        self.options_sizer.Add(self.options, 0, wx.EXPAND)
 
         self.l_int_size = wx.StaticText(self, label=" Size: ")
 
         self.l_int_y = wx.StaticText(self, label=" Y: ")
         self.l_int_x = wx.StaticText(self, label=" X: ")
         self.l_int_z = wx.StaticText(self, label=" Z: ")
-        self.int_size = wx.SpinCtrl(self, initial=4)
+        spin_size = (self.FromDIP(90), -1)
+        self.int_size = wx.SpinCtrl(self, initial=4, size=spin_size)
         self.int_size.Bind(wx.EVT_SPINCTRL, self.size_on_change)
-        self.int_y = wx.SpinCtrl(self, initial=4)
-        self.int_x = wx.SpinCtrl(self, initial=4)
-        self.int_z = wx.SpinCtrl(self, initial=4)
+        self.int_y = wx.SpinCtrl(self, initial=4, size=spin_size)
+        self.int_x = wx.SpinCtrl(self, initial=4, size=spin_size)
+        self.int_z = wx.SpinCtrl(self, initial=4, size=spin_size)
 
-        self.bot_sizer.Add(self.l_int_size)
-        self.bot_sizer.Add(self.int_size)
-        self.bot_sizer.Add(self.l_int_y)
-        self.bot_sizer.Add(self.int_y)
-        self.bot_sizer.Add(self.l_int_x)
-        self.bot_sizer.Add(self.int_x)
-        self.bot_sizer.Add(self.l_int_z)
-        self.bot_sizer.Add(self.int_z)
-        self.bot_sizer.Fit(self)
+        # Two balanced rows keep the Size/Y/X/Z fields inside the window.
+        for label, spinner in ((self.l_int_size, self.int_size),
+                               (self.l_int_y, self.int_y),
+                               (self.l_int_x, self.int_x),
+                               (self.l_int_z, self.int_z)):
+            field = wx.BoxSizer(wx.HORIZONTAL)
+            field.Add(label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, pad)
+            field.Add(spinner, 1, wx.EXPAND)
+            self.bot_sizer.Add(field, 1, wx.EXPAND)
 
         self.boxgrid_b = wx.GridSizer(1, 6, 1, 5)
 
-        # self.boxgrid_b.Add(self.staus_pause_pointer)
         self.boxgrid_b.Add(self._up)
         self.boxgrid_b.Add(self._down)
         self.boxgrid_b.Add(self._north)
@@ -7832,8 +10784,7 @@ class ShapePainter(wx.Frame):
         self.boxgrid_b.Add(self._east)
         self.boxgrid_b.Add(self._west)
 
-        self.move_boxs_sizer.Add(self.boxgrid_b, 0, wx.LEFT, 50)
-        self.move_boxs_sizer.Fit(self)
+        self.move_boxs_sizer.Add(self.boxgrid_b, 0)
         self._sizer.Hide(self.move_boxs_sizer, recursive=True)
 
         self._pause_pointer = True
@@ -7851,6 +10802,8 @@ class ShapePainter(wx.Frame):
         self.current_point = ()
         self.Bind(wx.EVT_CLOSE, self.on_close)
         self.bind_events()
+        self.Fit()
+        _clamp_window_to_display(self)
         self.Layout()
         self.Thaw()
 
@@ -7900,10 +10853,6 @@ class ShapePainter(wx.Frame):
                             xxx = x
                         sel_box = None
                         overall = yyy + xxx + zzz
-                        # if self.options.GetSelection() == 0:
-                        #     if overall < o_size:
-                        #         sel_box = "Yes"
-                        # else:
 
                         if overall >= inner_size:
                             if overall <= o_size:
@@ -7919,8 +10868,6 @@ class ShapePainter(wx.Frame):
                             area[(xx + x, yy - y, zz - z)] = sel_box
                             area[(xx - x, yy + y, zz + z)] = sel_box
 
-            # dupes = []
-            # points = []
             for (x, y, z), sel_box in area.items():
                 if sel_box:
                     yield SelectionBox((x - 1, y - 1, z - 1), (x, y, z))
@@ -8088,7 +11035,6 @@ class ShapePainter(wx.Frame):
                 evt.Skip()
         else:
             self.current_point = evt.point
-            # print(self.location_last)
             evt.Skip()
         evt.Skip()
 
@@ -8117,68 +11063,6 @@ class ShapePainter(wx.Frame):
             # Rebuild the world renderer
             self.canvas.renderer.render_world.rebuild_changed()
         event.Skip()
-        # TODO FILL IN THE MIDDLE TO MAKE HOLLOW THIS DONT WORK
-        # max_x = self.canvas.selection.selection_group.merge_boxes().max_x
-        # max_y = self.canvas.selection.selection_group.merge_boxes().max_y
-        # max_z = self.canvas.selection.selection_group.merge_boxes().max_z
-        # b1, b2 = self.canvas.selection.selection_group.merge_boxes().bounds
-        # xx1,yy1,zz1 = self.canvas.selection.selection_group.merge_boxes().min_array
-        # xx2, yy2, zz2 = self.canvas.selection.selection_group.merge_boxes().max_array
-        # xx,yy,zz = (xx1+xx2)//2,(yy1+yy2)//2,(zz1+zz2)//2
-        # rx,ry,rz = abs(b1[0] - b2[0]), abs(b1[1]) - abs(b2[1]), abs(b1[2]) - abs(b2[2])
-        # #outer = abs(max_z) + abs(max_x) + abs(max_y)
-        #
-        # inner = 3 ** 2 + 1 #rx + ry + rz
-        # area = {}
-        # # for i, (xx,yy,zz) in enumerate(self.canvas.selection.selection_group.merge_boxes().blocks):
-        # for y in range((abs(ry)) +1):
-        #     yyy = y ** 2 - 1
-        #     for z in range((abs(rz)) + 1):
-        #         zzz = z ** 2 - 1
-        #         for x in range((abs(rx)) + 1):
-        #             xxx = x ** 2 - 1
-        #             overall = (abs(xxx) + abs(yyy) + abs(zzz))
-        #             # inner = (rx + abs(xx)) + (ry + abs(yy)) +  (rz + abs(zz)) // 3
-        #             sel_box = None
-        #             # if overall <= inner_size:
-        #             if overall <= inner:
-        #                 sel_box = "Yes"
-        #
-        #             if sel_box is not None:
-        #                 area[(xx - x, yy + y, zz - z)] = sel_box
-        #                 area[(xx - x, yy - y, zz + z)] = sel_box
-        #                 area[(xx - x, yy - y, zz - z)] = sel_box
-        #                 area[(xx + x, yy + y, zz + z)] = sel_box
-        #                 area[(xx + x, yy + y, zz - z)] = sel_box
-        #                 area[(xx + x, yy - y, zz + z)] = sel_box
-        #                 area[(xx + x, yy - y, zz - z)] = sel_box
-        #                 area[(xx - x, yy + y, zz + z)] = sel_box
-        #
-        # dirt = Block('minecraft', 'air')
-        # for (x, y, z), sel_box in area.items():
-        #     if sel_box:
-        #         self.world.set_version_block(x, y, z, self.canvas.dimension,
-        #                    (platform, world_version),
-        #                      dirt, None)
-
-        # for p1 in locations:
-        #     for p2 in locations:
-        #         interpolated = interpolate_points(p1, p2, locations)
-        #         for point in interpolated:
-        #
-
-        # Fill in all points within the bounding box with dirt blocks, excluding the original selection
-        # dirt = Block('minecraft', 'dirt')
-        # for x in range(min_x, max_x + 1):
-        #     for y in range(min_y, max_y + 1):
-        #         for z in range(min_z, max_z + 1):
-        #             # Check if the current point is inside the bounding box
-        #             if (x, y, z) in locations:
-        #                 continue
-        #             # Fill in the point with a dirt block
-        #             self.world.set_version_block(x, y, z, self.canvas.dimension,
-        #                                          (platform, world_version),
-        #                                          dirt, None)
 
     def mouse_tog_on(self, event):
         self.mouse_click(event)
@@ -8194,7 +11078,6 @@ class ShapePainter(wx.Frame):
         event.Skip()
 
     def key_down_event(self, evt):
-        # print(evt.GetKeyCode())
 
         if evt.GetKeyCode() == 332 or evt.GetKeyCode() == 315:
             fake_event = wx.CommandEvent(wx.EVT_BUTTON.typeId)
@@ -8262,7 +11145,6 @@ class ShapePainter(wx.Frame):
         self.canvas.Unbind(wx.EVT_LEFT_DOWN, handler=self.mouse_tog_on)
         self.canvas.Unbind(wx.EVT_LEFT_UP, handler=self.mouse_tog_off)
         self.canvas.Unbind(wx.EVT_TIMER, handler=self.mouse_click, source=self.timer)
-        # self._curs.unbind_events()
         self.canvas.Unbind(EVT_POINT_CHANGE, handler=self._on_pointer_change)
         self.Destroy()
 
@@ -8369,31 +11251,67 @@ class ShapePainter(wx.Frame):
 
 class MaterialCounter(wx.Frame):
     def __init__(self, parent, canvas, world, *args, **kw):
-        super(MaterialCounter, self).__init__(parent, *args, **kw,
-                                              style=(wx.MINIMIZE_BOX | wx.MAXIMIZE_BOX | wx.RESIZE_BORDER |
-                                                     wx.SYSTEM_MENU | wx.CAPTION | wx.CLOSE_BOX | wx.CLIP_CHILDREN |
-                                                     wx.FRAME_FLOAT_ON_PARENT),
-                                              title="NBT Editor for Entities")
+        super(MaterialCounter, self).__init__(
+            parent,
+            *args,
+            **kw,
+            style=(
+                wx.MINIMIZE_BOX
+                | wx.MAXIMIZE_BOX
+                | wx.RESIZE_BORDER
+                | wx.SYSTEM_MENU
+                | wx.CAPTION
+                | wx.CLOSE_BOX
+                | wx.CLIP_CHILDREN
+                | wx.FRAME_FLOAT_ON_PARENT
+            ),
+            title="Material Counter",
+        )
 
         self.parent = parent
-
         self.canvas = canvas
         self.world = world
         self.platform = self.world.level_wrapper.platform
-        self.font = wx.Font(13, wx.FONTFAMILY_ROMAN, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL)
+
+        self.font = wx.Font(
+            11,
+            wx.FONTFAMILY_ROMAN,
+            wx.FONTSTYLE_NORMAL,
+            wx.FONTWEIGHT_NORMAL,
+        )
+        self.SetFont(self.font)
         self.SetForegroundColour((0, 255, 0))
         self.SetBackgroundColour((0, 0, 0))
-        self.SetFont(self.font)
-        self.SetMinSize((520, 720))
+
+        pad = self.FromDIP(6)
         self._sizer = wx.BoxSizer(wx.VERTICAL)
-        self.text = wx.TextCtrl(self, style=wx.TE_MULTILINE, size=(280, 650), pos=(30, 30))
-        self.test = wx.Button(self, label="Get Materials count", pos=(0, 0))
+        self.SetSizer(self._sizer)
+
+        self.test = wx.Button(self, label="Get Materials Count")
+        self.test.Bind(wx.EVT_BUTTON, self._run_count)
+        self.text = wx.TextCtrl(
+            self,
+            style=wx.TE_MULTILINE | wx.TE_READONLY,
+            size=self.FromDIP(wx.Size(310, 200)),
+        )
         self.text.SetForegroundColour((0, 255, 0))
         self.text.SetBackgroundColour((0, 0, 0))
         self.text.SetFont(self.font)
-        self.test.Bind(wx.EVT_BUTTON, self._run_count)
-        self._sizer.Add(self.test)
-        self._sizer.Add(self.text)
+
+        self._sizer.Add(self.test, 0, wx.EXPAND | wx.ALL, pad)
+        self._sizer.Add(
+            self.text,
+            1,
+            wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM,
+            pad,
+        )
+
+        self.SetMinSize(self.FromDIP(wx.Size(320, 250)))
+        # Establish the initial text viewport before the first native show / move event.
+        self.SetClientSize(self.FromDIP(wx.Size(380, 300)))
+        self.Layout()
+        self.CentreOnParent()
+        _clamp_window_to_display(self)
 
     def _run_count(self, _):
 
@@ -8583,7 +11501,6 @@ class BedRock(wx.Panel):
                                 nbt_ = self.nbt_loder(raw)
                             except:
                                 nbt_ = from_snbt(raw)
-                            # print(nbt_)
                             try:
                                 name = str(nbt_['identifier']).replace("minecraft:", "")
                             except:
@@ -8674,7 +11591,7 @@ class BedRock(wx.Panel):
                                 prefixList.append(b'actorprefix' + data[CntB:CntB + 8])
                             pdig_to_delete.append(key)
                     except KeyError as e:
-                        print("keyerror")
+                        print(f"Chunk entity digest key was not found: {key!r}")
 
             for pkey in prefixList:
                 self.level_db.delete(pkey)
@@ -8783,7 +11700,6 @@ class BedRock(wx.Panel):
         mx, my, mz = self.canvas.selection.selection_group.to_box().shape
         block_pos = []
         reps = EntitiePlugin.con_boc(self, "Air Blocks", 'Do you want to encude air block?')
-        # bl = np.zeros(shape, dtype=numpy.uint32)
         for x in range(0, (mx)):
             for y in range(0, (my)):
                 for z in range(0, (mz)):
@@ -8981,13 +11897,11 @@ class BedRock(wx.Panel):
                             replace(b'\x08\n\x00StorageKey\x08\x00', b'\x07\n\x00StorageKey\x08\x00\x00\x00')
                         nbt_data = load(actor, compressed=False, little_endian=True, string_decoder=utf8_escape_decoder)
 
-                        # print(nbt_data)
                         pos = nbt_data.get("Pos")
                         print(pos)
                         x, y, z = math.floor(pos[0]), math.floor(pos[1]), math.floor(pos[2])
 
                         if (x, y, z) in selection:
-                            # nbt_entitie = ListTag()
                             new_pos = mapdic[(x, y, z)]
                             nbt_pos = ListTag(
                                 [FloatTag(sum([new_pos[0],
@@ -9000,7 +11914,6 @@ class BedRock(wx.Panel):
                             nbt_block_pos = ListTag([IntTag(new_pos[0]),
                                                              IntTag(new_pos[1]),
                                                              IntTag(new_pos[2])])
-                            # nbt_data.pop('internalComponents')
                             nbt_data.pop('UniqueID')
                             nbt_nbt = from_snbt(nbt_data.to_snbt())
                             main_entry = CompoundTag()
@@ -9012,7 +11925,6 @@ class BedRock(wx.Panel):
 
             elif self.world.level_wrapper.version < (1, 18, 30, 4, 0):
                 print("<1.18")
-                # entitie = ListTag([])
                 for cx, cz in self.canvas.selection.selection_group.chunk_locations():
                     chunk = self.world.level_wrapper.get_raw_chunk_data(cx, cz, self.canvas.dimension)
                     if chunk.get(b'2') != None:
@@ -9038,8 +11950,6 @@ class BedRock(wx.Panel):
                                 nbt_block_pos = ListTag([IntTag(new_pos[0]),
                                                                  IntTag(new_pos[1]),
                                                                  IntTag(new_pos[2])])
-                                # nbt_data.pop('internalComponents')
-                                # nbt_data.pop('UniqueID')
                                 nbt_nbt_ = from_snbt(nbt_data.to_snbt())
                                 main_entry = CompoundTag()
                                 main_entry['nbt'] = nbt_nbt
@@ -9064,17 +11974,6 @@ class BedRock(wx.Panel):
                     put_key = b''.join([b'actorprefix', actorKey])
 
                     digp = b''.join([b'digp', struct.pack('<ii', xc, zc), self.get_dim_value_bytes()])
-                    # try:
-                    #     # print(self.level_db.get(digp))
-                    #     new_digp = self.level_db.get(digp)
-                    #     # print(self.level_db.get(digp))
-                    # except:
-                    #     new_digp = b''
-                    # try:
-                    #     new_actor = self.level_db.get(put_key)
-                    # except:
-                    #     new_actor = b''
-                    # new_digp += actorKey
                     new_actor += x.save_to(compressed=False, little_endian=True)
 
                     self.level_db.put(put_key, new_actor)
@@ -9099,7 +11998,6 @@ class BedRock(wx.Panel):
         dlg = ExportImportCostomDialog(None)
         dlg.InitUI(2)
         res = dlg.ShowModal()
-        # self._set_list_of_actors_digp
         if dlg.ms_file.GetValue():
             fdlg = wx.FileDialog(self, "export Entities", "", "",
                                  f"SNBT (*.snbt_{self.world.level_wrapper.platform})|*.*", wx.FD_OPEN)
@@ -9126,9 +12024,7 @@ class BedRock(wx.Panel):
                         x, y, z = nbtd.get('Pos').value
                         ex, ey, ez = math.floor(x), math.floor(y), math.floor(z)
                         if (ex, ey, ez) == xx:
-                            # print(ex,ey,ez, nbtd.value)
                             anbt['structure']['entities'].append(nbtd.value)
-            # nbt_file = amulet_NBTFile(anbt)
             asave_to(pathto, compressed=False, little_endian=True)
             EntitiePlugin.Onmsgbox(self, "Entities Added To Structure File", "Complete")
             return
@@ -9183,7 +12079,6 @@ class BedRock(wx.Panel):
                         dig_byte_list += new_prefix[len(b'actorprefix'):]
                         final_data = ent_data.save_to(compressed=False, little_endian=True).replace(
                             b'\x07\n\x00StorageKey\x08\x00\x00\x00', b'\x08\n\x00StorageKey\x08\x00')
-                        # print(new_prefix, final_data)
                         self.level_db.put(new_prefix, final_data)
                         print(new_prefix, "New")
                     self.level_db.put(key, dig_byte_list)
@@ -9394,7 +12289,6 @@ class BedRock(wx.Panel):
 
         NewRawB = b''
         selection = self.ui_entitie_choice_list.GetSelection()
-        # newData = self.nbt_editor_instance.GetValue()
         res = EntitiePlugin.important_question(self)
         if res == False:
             return
@@ -9458,8 +12352,6 @@ class BedRock(wx.Panel):
 
             EntitiePlugin.Onmsgbox(self, "Entities Saved", "Complete")
 
-    def check_if_key_used(self, l, h):
-        pass
 
     def build_actor_key(self, l, h):
         return b''.join([b'actorprefix', struct.pack('>ii', l, h)])
@@ -9590,8 +12482,6 @@ class BedRock(wx.Panel):
                     done_actors = True
                 else:
                     if b"actorprefixb'\\" not in k:
-                        # print(k, v)
-                        # self.level_db.delete(k)
                         self.actors[struct.unpack('>II', k[11:])].append(v)
 
             while not done_digps:
@@ -9605,7 +12495,6 @@ class BedRock(wx.Panel):
                         if len(k) == 12:
                             k += b'\x00\x00\x00\x00'
                         for p in range(0, len(v), 8):
-                            #  print(v)
                             self.digp[struct.unpack('<iii', k[4:])].append(
                                 struct.unpack('>II', v[p:p + 8]))
                             self.not_to_remove.append(struct.unpack('>II', v[p:p + 8]))
@@ -9663,9 +12552,8 @@ class BedRock(wx.Panel):
             try:
                 px, py, pz = v[0].get('Pos').value
             except:
-                print("ERROR WHY")
+                print(f"Entity position could not be read for actor {k!r}.")
                 pass
-            #  print(k, v, name, "wtf went wrong")
             if name not in filter and custom_filter == ['']:
                 self.EntyData.append(v[0].to_snbt(1))
                 self.lstOfE.append(
@@ -9676,7 +12564,6 @@ class BedRock(wx.Panel):
                 self.EntyData.append(v[0].to_snbt(1))
                 self.lstOfE.append(
                     name + " , " + str(px).split(".")[0] + ", " + str(py).split(".")[0] + ", " + str(pz).split(".")[0])
-        # print(len(self.lstOfE), len(self.EntyData), len(self.current_selection), len(self.the_dead.items()))
         zipped_lists = zip(self.lstOfE, self.EntyData, self.current_selection)
         sorted_pairs = sorted(zipped_lists)
         tuples = zip(*sorted_pairs)
@@ -9695,10 +12582,8 @@ class BedRock(wx.Panel):
                 bring_back["internalComponents"]["EntityStorageKeyComponent"]['StorageKey'])
         except:
             recovory_key = raw_dead_actor_key[11:]
-        #  print(recovory_key)
 
         x, y, z = bring_back.get('Pos').value
-        # print(x, y, z)
         try:
             bring_back["Attributes"][1]['Current'] = TAG_Float(20.)
             bring_back["Dead"] = TAG_Byte(0)
@@ -9709,7 +12594,6 @@ class BedRock(wx.Panel):
         self.level_db.put(raw_dead_actor_key, raw_nbt)
         for popoff in self.digp.keys():
             for d in self.digp[popoff]:
-                #   print(self._storage_key_(recovory_key), d)
                 if self._storage_key_(recovory_key) in d:
                     dd = self.digp[popoff].pop(d)
 
@@ -10179,10 +13063,8 @@ class Java(wx.Panel):
         res = EntitiePlugin.important_question(self)
         if res == False:
             return
-        # newData = self.nbt_editor_instance.GetValue()  # get new data
         newData = NBTEditor.build_to(self.nbt_editor_instance, _)
         data = newData
-        # data = from_snbt(newData)  # convert to nbt
         cx, cz = block_coords_to_chunk_coords(data.get("Pos")[0].value, data.get("Pos")[2].value)
         loc = data.get("Pos")
         uuid = data.get("UUID")
@@ -10224,7 +13106,6 @@ class Java(wx.Panel):
         reps = EntitiePlugin.con_boc(self, "Air Blocks", 'Do you want to encude air block?')
         mx, my, mz = self.canvas.selection.selection_group.to_box().shape
         block_pos = []
-        # bl = np.zeros(shape, dtype=numpy.uint32)
         for x in range(0, (mx)):
             for y in range(0, (my)):
                 for z in range(0, (mz)):
@@ -10345,7 +13226,7 @@ class Java(wx.Panel):
                                                  (block_platform, block_version), block, x[3])
 
             self.canvas.run_operation(lambda: self._refresh_chunk_now(self.canvas.dimension, self.world, xx, zz))
-            self.world.save()  # MUST SAVE NOW OR THIS WILL REMOVE ENTITIES
+            self.world.save()  # Persist block changes before writing entity records to avoid losing entity data.
             e_nbt_list = []
             for x in get('entities'):
                 if str(x) != '':
@@ -10503,197 +13384,310 @@ class Java(wx.Panel):
 
 class EntitiePlugin(wx.Frame):
     def __init__(self, parent, canvas, world, *args, **kw):
-        super(EntitiePlugin, self).__init__(parent, *args, **kw,
-                                            style=(wx.MINIMIZE_BOX | wx.MAXIMIZE_BOX | wx.RESIZE_BORDER |
-                                                   wx.SYSTEM_MENU | wx.CAPTION | wx.CLOSE_BOX | wx.CLIP_CHILDREN |
-                                                   wx.FRAME_FLOAT_ON_PARENT),
-                                            title="NBT Editor for Entities")
+        super(EntitiePlugin, self).__init__(
+            parent,
+            *args,
+            **kw,
+            style=(
+                wx.MINIMIZE_BOX
+                | wx.MAXIMIZE_BOX
+                | wx.RESIZE_BORDER
+                | wx.SYSTEM_MENU
+                | wx.CAPTION
+                | wx.CLOSE_BOX
+                | wx.CLIP_CHILDREN
+                | wx.FRAME_FLOAT_ON_PARENT
+            ),
+            title="NBT Editor for Entities",
+        )
 
         self.parent = parent
-
         self.canvas = canvas
         self.world = world
         self.platform = self.world.level_wrapper.platform
-        self.font = wx.Font(13, wx.FONTFAMILY_ROMAN, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL)
-        self.SetForegroundColour((0, 255, 0))
-        self.SetBackgroundColour((0, 0, 0))
-        self.SetFont(self.font)
-        self.SetMinSize((520, 720))
-        self.lstOfE = ['This List will Contain', 'Entities', "NOTE: the TAB key",
-                       " to toggle Perspective", "Canvas must be active", "Mouse over the canvas", "To activate canvas"]
+        self.lstOfE = [
+            "This List will Contain",
+            "Entities",
+            "NOTE: the TAB key",
+            " to toggle Perspective",
+            "Canvas must be active",
+            "Mouse over the canvas",
+            "To activate canvas",
+        ]
         self.nbt_data = CompoundTag({})
         self.Freeze()
         self.EntyData = []
         self._highlight_edges = numpy.zeros((2, 3), dtype=bool)
 
-        if self.platform == 'bedrock':
-            self.operation = BedRock()
-            self.operation.world = self.world
-            self.operation.canvas = self.canvas
-            self.operation.EntyData = self.EntyData
+        self.font = wx.Font(
+            10,
+            wx.FONTFAMILY_ROMAN,
+            wx.FONTSTYLE_NORMAL,
+            wx.FONTWEIGHT_NORMAL,
+        )
+        self.SetFont(self.font)
+        self.SetForegroundColour((0, 255, 0))
+        self.SetBackgroundColour((0, 0, 0))
 
+        if self.platform == "bedrock":
+            self.operation = BedRock()
         else:
             self.operation = Java()
-            self.operation.world = self.world
-            self.operation.canvas = self.canvas
-            self.operation.EntyData = self.EntyData
             self.operation.lstOfE = self.lstOfE
 
+        self.operation.world = self.world
+        self.operation.canvas = self.canvas
+        self.operation.EntyData = self.EntyData
         self.operation.select_tracer = collections.defaultdict(list)
         self.get_all_flag = False
         self.operation.get_all_flag = self.get_all_flag
 
+        pad = self.FromDIP(5)
+        field_size = self.FromDIP(wx.Size(125, 28))
+
         self._sizer_v_main = wx.BoxSizer(wx.VERTICAL)
+        self.SetSizer(self._sizer_v_main)
+
+        # Retain these attribute names for compatibility with older code, but
+        # use ordinary non-overlapping sizers.
         self.left_sizer = wx.BoxSizer(wx.VERTICAL)
         self.right_sizer = wx.BoxSizer(wx.VERTICAL)
-
+        self.top_sizer = wx.BoxSizer(wx.VERTICAL)
         self.bottom_h = wx.BoxSizer(wx.HORIZONTAL)
-        self.top_sizer = wx.GridSizer(4, 3, 0, -1)
-        self.button_group_one = wx.GridSizer(2, 2, 3, -10)
-        self.button_group_two = wx.GridSizer(0, 3, 3, 1)
-        self.button_group_three = wx.GridSizer(0, 2, 5, 5)
-        self.button_group_four = wx.GridSizer(0, 4, 5, 5)
+        self.button_group_one = wx.BoxSizer(wx.HORIZONTAL)
+        self.button_group_two = wx.BoxSizer(wx.HORIZONTAL)
+        self.button_group_three = wx.BoxSizer(wx.HORIZONTAL)
+        self.button_group_four = wx.BoxSizer(wx.HORIZONTAL)
 
-        self.SetSizer(self._sizer_v_main)
-        self.operation.filter_include_label = wx.StaticText(self, label="Include:", size=(76, 25))
-        self.operation.filter_exclude_label = wx.StaticText(self, label="Exclude:", size=(76, 25))
-        self.operation.exclude_filter = wx.TextCtrl(self, style=wx.TE_LEFT, size=(120, 25))
-        self.operation.include_filter = wx.TextCtrl(self, style=wx.TE_LEFT, size=(120, 25))
+        self.font_ex_in = wx.Font(
+            10,
+            wx.FONTFAMILY_ROMAN,
+            wx.FONTSTYLE_NORMAL,
+            wx.FONTWEIGHT_BOLD,
+        )
 
-        self.button_group_four.Add(self.operation.filter_include_label,0, wx.TOP, -2)
-        self.button_group_four.Add(self.operation.include_filter, 0, wx.LEFT, 21)
-        self.button_group_four.Add(self.operation.filter_exclude_label,0, wx.TOP, -2)
-        self.button_group_four.Add(self.operation.exclude_filter, 0, wx.LEFT, 21)
-        self.font_ex_in = wx.Font(12, wx.FONTFAMILY_ROMAN, wx.FONTSTYLE_MAX, wx.FONTWEIGHT_BOLD)
+        self.operation.filter_include_label = wx.StaticText(self, label="Include:")
+        self.operation.filter_exclude_label = wx.StaticText(self, label="Exclude:")
+        self.operation.include_filter = wx.TextCtrl(
+            self,
+            style=wx.TE_LEFT,
+            size=field_size,
+        )
+        self.operation.exclude_filter = wx.TextCtrl(
+            self,
+            style=wx.TE_LEFT,
+            size=field_size,
+        )
         self.operation.exclude_filter.SetForegroundColour((0, 0, 0))
         self.operation.exclude_filter.SetBackgroundColour((255, 0, 0))
         self.operation.include_filter.SetForegroundColour((0, 0, 0))
         self.operation.include_filter.SetBackgroundColour((0, 255, 0))
         self.operation.include_filter.SetFont(self.font_ex_in)
         self.operation.exclude_filter.SetFont(self.font_ex_in)
-        self.operation.exclude_filter.SetToolTip(".Seporate with a comma , "
-                                                 "to exclude more that one, Dont use Filters together")
-
-        self.operation.include_filter.SetToolTip("Seporate with a comma , "
-                                                 "to enclude more that one, Dont use Filters together")
-
-        self._sizer_v_main.Add(self.top_sizer)
-        self._sizer_v_main.Add(self.button_group_four, 0, wx.TOP, 5)
-        self._sizer_v_main.Add(self.bottom_h)
-        self.font = wx.Font(11, wx.FONTFAMILY_ROMAN, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL)
+        self.operation.exclude_filter.SetToolTip(
+            "Separate values with commas. Do not use Include and Exclude together."
+        )
+        self.operation.include_filter.SetToolTip(
+            "Separate values with commas. Do not use Include and Exclude together."
+        )
 
         self.delete_selected = wx.Button(self, label="Delete All Selected")
-        # self.list_dead = wx.Button(self, label="List Dead", size=(60, 20))
-        # self.make_undead = wx.Button(self, label="Make UnDead", size=(80, 20))
-        self.delete_unselected = wx.Button(self, label="Delete All Un_Selected")
-        self._move = wx.Button(self, label="Move", size=(50, 24))
-        self._copy = wx.Button(self, label="Copy", size=(50, 24))
-        self._delete = wx.Button(self, label="Delete", size=(50, 24))
-        self._get_button = wx.Button(self, label="Get Entities", size=(80, 30))
-        self._get_all_button = wx.Button(self, label="Get All", size=(50, 30))
-        self._get_all_button.SetToolTip("Get All Entities in the dimension and unselects any selections")
-        self._get_button.SetToolTip("Get All Entities within the selected chunk area. "
-                                    "Note: selection shows the hole chunk")
+        self.delete_unselected = wx.Button(self, label="Delete All Unselected")
+        self._move = wx.Button(self, label="Move")
+        self._copy = wx.Button(self, label="Copy")
+        self._delete = wx.Button(self, label="Delete")
+        self._get_button = wx.Button(self, label="Get Entities")
+        self._get_all_button = wx.Button(self, label="Get All")
         self._set_button = wx.Button(self, label="Apply Changes")
         self.operation._imp_button = wx.Button(self, label="Import Entities")
         self.operation._exp_button = wx.Button(self, label="Export Entities")
         self._teleport_check = wx.CheckBox(self, label="Auto teleportation")
         self._teleport_check.SetValue(True)
-        self._move.SetToolTip("Prepares the new position (from cords above) for the selected entitiy ")
-        self._copy.SetToolTip("Prepares a copy of the entities and sets its location (from cords above)")
-        self._delete.SetToolTip("Delete the selected entitie")
-        self.delete_selected.SetToolTip(
-            "Immediately Deletes All Selected areas with Entities From World, "
-            "\n NOTE: There is No Undo, Also Entities may be stored in a different chunk , Be sure to have a Backup! ")
-        self.delete_unselected.SetToolTip(
-            "Immediately Deletes All Un_Selected Entities From World,  "
-            "\n NOTE: There is No Undo, Also Entities may be stored in a different chunk , Be sure to have a Backup! ")
 
-        self.delete_unselected.Bind(wx.EVT_BUTTON,
-                                    lambda event: self.operation.delete_un_or_selected_entities(event, True))
-        self.delete_selected.Bind(wx.EVT_BUTTON,
-                                  lambda event: self.operation.delete_un_or_selected_entities(event, False))
-        self._move.Bind(wx.EVT_BUTTON, lambda event: self.operation._move_copy_entitie_data(event, False))
-        self._copy.Bind(wx.EVT_BUTTON, lambda event: self.operation._move_copy_entitie_data(event, True))
-        self._delete.Bind(wx.EVT_BUTTON, lambda event: self.operation._delete_from_list(event))
-        self._get_button.Bind(wx.EVT_BUTTON, lambda event: self.operation._load_entitie_data(event, False, False))
-        self._get_all_button.Bind(wx.EVT_BUTTON, lambda event: self.operation._load_entitie_data(event, False, True))
-        # self.list_dead.Bind(wx.EVT_BUTTON, lambda event: self.operation._list_the_dead(event))
-        # self.make_undead.Bind(wx.EVT_BUTTON, lambda event: self.operation._make_undead(event))
-        self._set_button.Bind(wx.EVT_BUTTON, lambda event: self.operation._save_data_to_world(event))
+        self._get_all_button.SetToolTip(
+            "Get all entities in the dimension and clear any current selections."
+        )
+        self._get_button.SetToolTip(
+            "Get entities within the selected chunk area."
+        )
+        self._move.SetToolTip(
+            "Prepare the selected entity to move to the coordinates below."
+        )
+        self._copy.SetToolTip(
+            "Prepare a copy of the selected entity at the coordinates below."
+        )
+        self._delete.SetToolTip("Delete the selected entity.")
+        self.delete_selected.SetToolTip(
+            "Immediately delete entities in selected areas. There is no undo."
+        )
+        self.delete_unselected.SetToolTip(
+            "Immediately delete entities outside selected areas. There is no undo."
+        )
+
+        self.delete_unselected.Bind(
+            wx.EVT_BUTTON,
+            lambda event: self.operation.delete_un_or_selected_entities(event, True),
+        )
+        self.delete_selected.Bind(
+            wx.EVT_BUTTON,
+            lambda event: self.operation.delete_un_or_selected_entities(event, False),
+        )
+        self._move.Bind(
+            wx.EVT_BUTTON,
+            lambda event: self.operation._move_copy_entitie_data(event, False),
+        )
+        self._copy.Bind(
+            wx.EVT_BUTTON,
+            lambda event: self.operation._move_copy_entitie_data(event, True),
+        )
+        self._delete.Bind(
+            wx.EVT_BUTTON,
+            lambda event: self.operation._delete_from_list(event),
+        )
+        self._get_button.Bind(
+            wx.EVT_BUTTON,
+            lambda event: self.operation._load_entitie_data(event, False, False),
+        )
+        self._get_all_button.Bind(
+            wx.EVT_BUTTON,
+            lambda event: self.operation._load_entitie_data(event, False, True),
+        )
+        self._set_button.Bind(
+            wx.EVT_BUTTON,
+            lambda event: self.operation._save_data_to_world(event),
+        )
         self.operation._imp_button.Bind(wx.EVT_BUTTON, self.operation._imp_entitie_data)
         self.operation._exp_button.Bind(wx.EVT_BUTTON, self.operation._exp_entitie_data)
 
-        self.operation._X = wx.TextCtrl(self, style=wx.TE_LEFT)  # "X of Selected")
-        self.operation._Y = wx.TextCtrl(self, style=wx.TE_LEFT)  # "Y of Selected")
-        self.operation._Z = wx.TextCtrl(self, style=wx.TE_LEFT)  # "Z of Selected")
+        self.operation._X = wx.TextCtrl(self, style=wx.TE_LEFT, size=field_size)
+        self.operation._Y = wx.TextCtrl(self, style=wx.TE_LEFT, size=field_size)
+        self.operation._Z = wx.TextCtrl(self, style=wx.TE_LEFT, size=field_size)
+
         self.operation._X.SetForegroundColour((0, 255, 255))
         self.operation._Y.SetForegroundColour((255, 0, 0))
         self.operation._Z.SetForegroundColour((255, 255, 0))
         self.operation._X.SetBackgroundColour((255, 0, 0))
         self.operation._Y.SetBackgroundColour((0, 255, 0))
         self.operation._Z.SetBackgroundColour((0, 0, 255))
-        self.operation._X.SetLabel("X of Selected")
-        self.operation._Y.SetLabel("Y of Selected")
-        self.operation._Z.SetLabel("Z of Selected")
+        self.operation._X.SetValue("X of Selected")
+        self.operation._Y.SetValue("Y of Selected")
+        self.operation._Z.SetValue("Z of Selected")
         self.operation._X.SetFont(self.font_ex_in)
         self.operation._Y.SetFont(self.font_ex_in)
         self.operation._Z.SetFont(self.font_ex_in)
 
-        self.top_sizer.Add(self.delete_unselected, 0, wx.TOP, 5)
-        self.top_sizer.Add(self.operation._imp_button, 0, wx.TOP, 5)
-        self.button_group_three.Add(self._get_button, 0, wx.TOP, 5)
-        self.button_group_three.Add(self._get_all_button, 0, wx.TOP, 5)
-        self.top_sizer.Add(self.button_group_three, 0, wx.TOP, 1)
+        row_one = wx.BoxSizer(wx.HORIZONTAL)
+        for button in (
+            self.delete_unselected,
+            self.operation._imp_button,
+            self._get_button,
+            self._get_all_button,
+        ):
+            row_one.Add(button, 1, wx.RIGHT, pad)
+        self.top_sizer.Add(row_one, 0, wx.EXPAND | wx.BOTTOM, pad)
 
-        self.top_sizer.Add(self.delete_selected)
+        row_two = wx.BoxSizer(wx.HORIZONTAL)
+        for button in (
+            self.delete_selected,
+            self.operation._exp_button,
+            self._set_button,
+        ):
+            row_two.Add(button, 1, wx.RIGHT, pad)
+        self.top_sizer.Add(row_two, 0, wx.EXPAND | wx.BOTTOM, pad)
 
-        self.top_sizer.Add(self.operation._exp_button)
-        self.top_sizer.Add(self._set_button)
+        coord_row = wx.BoxSizer(wx.HORIZONTAL)
+        for control in (self.operation._X, self.operation._Y, self.operation._Z):
+            coord_row.Add(control, 1, wx.RIGHT, pad)
+        self.top_sizer.Add(coord_row, 0, wx.EXPAND | wx.BOTTOM, pad)
 
-        self.top_sizer.Add(self.operation._X, 0, wx.TOP, -5)
-        self.top_sizer.Add(self.operation._Y, 0, wx.TOP, -5)
-        self.top_sizer.Add(self.operation._Z, 0, wx.TOP, -5)
-        # self.del_ghosts = wx.Button(self, label="Delete All", size=(60, 20))
-        # self.del_ghosts.SetToolTip("Delete all dead unlinked entities.")
-        # self.del_ghosts.Bind(wx.EVT_BUTTON, lambda event: self.operation._delete_all_the_dead(event))
-        # self.button_group_one.Add(self.list_dead)
-        # self.button_group_one.Add(self.make_undead)
-        # self.button_group_one.Add(self.del_ghosts)
-        if self.world.level_wrapper.platform == "bedrock":
-            if self.world.level_wrapper.version < (1, 18, 30, 4, 0):
-                self.list_dead.Hide()
-                # self.make_undead.Hide()
-                # self.del_ghosts.Hide()
-        elif self.world.level_wrapper.platform == "java":
-            self.list_dead.Hide()
-            # self.make_undead.Hide()
-            # self.del_ghosts.Hide()
-        self.top_sizer.Add(self.button_group_one, 0, wx.TOP, -10)
-        self.top_sizer.Add(self._teleport_check, 0, wx.LEFT, 7)
+        action_row = wx.BoxSizer(wx.HORIZONTAL)
+        action_row.Add(self._teleport_check, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, pad * 2)
+        for button in (self._move, self._copy, self._delete):
+            action_row.Add(button, 0, wx.RIGHT, pad)
+        self.top_sizer.Add(action_row, 0, wx.EXPAND)
 
-        self.button_group_two.Add(self._move)
-        self.button_group_two.Add(self._copy)
-        self.button_group_two.Add(self._delete)
-        self.top_sizer.Add(self.button_group_two)
+        self._sizer_v_main.Add(
+            self.top_sizer,
+            0,
+            wx.EXPAND | wx.ALL,
+            pad,
+        )
 
-        self.operation.ui_entitie_choice_list = wx.ListBox(self, style=wx.LB_HSCROLL, choices=self.lstOfE, pos=(0, 20),
-                                                           size=(140, 800))
-        self.operation.nbt_editor_instance = NBTEditor(self)
-        self.bottom_h.Add(self.operation.nbt_editor_instance, 130, wx.EXPAND, 52)
+        filter_row = wx.BoxSizer(wx.HORIZONTAL)
+        filter_row.Add(
+            self.operation.filter_include_label,
+            0,
+            wx.ALIGN_CENTER_VERTICAL | wx.RIGHT,
+            pad,
+        )
+        filter_row.Add(self.operation.include_filter, 1, wx.RIGHT, pad * 2)
+        filter_row.Add(
+            self.operation.filter_exclude_label,
+            0,
+            wx.ALIGN_CENTER_VERTICAL | wx.RIGHT,
+            pad,
+        )
+        filter_row.Add(self.operation.exclude_filter, 1)
+        self.button_group_four = filter_row
+        self._sizer_v_main.Add(
+            filter_row,
+            0,
+            wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM,
+            pad,
+        )
+
+        self.operation.ui_entitie_choice_list = wx.ListBox(
+            self,
+            style=wx.LB_HSCROLL,
+            choices=self.lstOfE,
+            size=self.FromDIP(wx.Size(200, 205)),
+        )
         self.operation.ui_entitie_choice_list.SetFont(self.font)
-        self.operation.ui_entitie_choice_list.Bind(wx.EVT_LISTBOX, lambda event: self.on_focus(event))
-
-        self.bottom_h.Add(self.operation.ui_entitie_choice_list, 50, wx.RIGHT, 0)
+        self.operation.ui_entitie_choice_list.Bind(
+            wx.EVT_LISTBOX,
+            lambda event: self.on_focus(event),
+        )
         self.operation.ui_entitie_choice_list.SetBackgroundColour((0, 0, 0))
         self.operation.ui_entitie_choice_list.SetForegroundColour((255, 255, 0))
 
-        self.bottom_h.Fit(self)
-        self._sizer_v_main.Fit(self)
+        self.operation.nbt_editor_instance = NBTEditor(self)
+
+        self.bottom_h.Add(
+            self.operation.ui_entitie_choice_list,
+            0,
+            wx.EXPAND | wx.RIGHT,
+            pad,
+        )
+        self.bottom_h.Add(
+            self.operation.nbt_editor_instance,
+            1,
+            wx.EXPAND,
+        )
+        self._sizer_v_main.Add(
+            self.bottom_h,
+            1,
+            wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM,
+            pad,
+        )
+
+        # Preserve the original conditional behavior without forcing a large
+        # fixed-height list or negative grid spacing.
+        if self.world.level_wrapper.platform == "bedrock":
+            if self.world.level_wrapper.version < (1, 18, 30, 4, 0):
+                if hasattr(self, "list_dead"):
+                    self.list_dead.Hide()
+        elif self.world.level_wrapper.platform == "java":
+            if hasattr(self, "list_dead"):
+                self.list_dead.Hide()
+
+        self.SetMinSize(self.FromDIP(wx.Size(620, 390)))
+        # Keep the initial editor usable without opening an oversized frame.
+        self.SetClientSize(self.FromDIP(wx.Size(700, 430)))
         self.Layout()
         self.Thaw()
+        self.CentreOnParent()
+        _clamp_window_to_display(self)
 
-        # self.nbt_editor_instance.Bind(wx.EVT_KEY_UP, self.autoSaveOnKeyPress)
 
     def bind_events(self):
         super().bind_events()
@@ -10702,7 +13696,6 @@ class EntitiePlugin(wx.Frame):
         self._selection.enable()
 
     def enable(self):
-        # self.canvas.camera.projection_mode = Projection.TOP_DOWN
         self._selection = BlockSelectionBehaviour(self.canvas)
         self._selection.enable()
 
@@ -10719,7 +13712,6 @@ class EntitiePlugin(wx.Frame):
 
     def update_player_data(self, new_data):
         self_ = self.Parent.Parent
-        # from_snbt(self.operation.EntyData[self.operation.ui_entitie_choice_list.GetSelection()])
         save_expanded = []
         f_root = self_.operation.nbt_editor_instance.tree.GetRootItem()
         r_c = self_.operation.nbt_editor_instance.tree.GetChildrenCount(f_root, 0)
@@ -10791,7 +13783,6 @@ class EntitiePlugin(wx.Frame):
             return nbt_path_keys[1:]
 
         def recurtree(item):
-            # for c in range(r_c):
             if item.IsOk():
                 i_c = self_.operation.nbt_editor_instance.tree.GetChildrenCount(item, recursively=True)
                 f_ic, cc_i = self_.operation.nbt_editor_instance.tree.GetFirstChild(item)
@@ -10812,8 +13803,13 @@ class EntitiePlugin(wx.Frame):
         self_.operation.nbt_editor_instance.Hide()
         NBTEditor.close(self_.operation.nbt_editor_instance, None, self_.GetParent())
         self_.operation.nbt_editor_instance = NBTEditor(self_, new_data)
-        self_.bottom_h.Add(self_.operation.nbt_editor_instance, 130, wx.EXPAND, 21)
-        self_.bottom_h.Add(self_.operation.ui_entitie_choice_list, 50, wx.RIGHT, 0)
+        self_.bottom_h.Add(
+            self_.operation.ui_entitie_choice_list,
+            0,
+            wx.EXPAND | wx.RIGHT,
+            self_.FromDIP(5),
+        )
+        self_.bottom_h.Add(self_.operation.nbt_editor_instance, 1, wx.EXPAND)
 
         self_.nbt_editor_instance = NBTEditor(self_, new_data)
         root = self_.operation.nbt_editor_instance.tree.GetRootItem()
@@ -10835,39 +13831,16 @@ class EntitiePlugin(wx.Frame):
         re_expand(root)
         self_.operation.nbt_editor_instance.tree.SetScrollPos(wx.VERTICAL, current_scr_h)
         self_.bottom_h.Layout()
-        self_.bottom_h.Fit(self_)
-        self_._sizer_v_main.Fit(self_)
         self_._sizer_v_main.Layout()
-        self_.Fit()
         self_.Layout()
 
         self.Close()
 
-    def get_dir_path(self, foldername, cx, cz):
-        return os.path.join(os.getcwd(), "plugins", "operations", foldername,
-                            "chunk_bk_up" + str(cx) + "." + str(cz) + ".txt")
 
-    def create_saved_entities_dir(self, foldername):
-        if not os.path.exists(os.path.join(os.getcwd(), "plugins", "operations", foldername)):
-            os.makedirs(os.path.join(os.getcwd(), "plugins", "operations", foldername))
-            print("Created Save Dir")
 
     def Onmsgbox(self, caption, message):  # message
         wx.MessageBox(message, caption, wx.OK | wx.ICON_INFORMATION)
 
-    def autoSaveOnKeyPress(self, _):
-
-        selection = self.operation.ui_entitie_choice_list.GetSelection()
-        # newData = self.operation.nbt_editor_instance.GetValue()
-        try:
-            self.operation.EntyData[selection] = NBTFile(from_snbt(newData))
-        except:
-            self.Onmsgbox("syntax error", "Try agian")
-            setdata = self.operation.EntyData[selection]
-            # try:
-            #     self.operation.nbt_editor_instance.SetValue(from_snbt(setdata).to_snbt(1))
-            # except:
-            #     self.operation.nbt_editor_instance.SetValue(setdata.to_snbt(1))
 
     def on_focus(self, evt):
 
@@ -10877,17 +13850,17 @@ class EntitiePlugin(wx.Frame):
         self.operation.nbt_editor_instance.Hide()
         NBTEditor.close(self.operation.nbt_editor_instance, evt, self.GetParent())
         self.operation.nbt_editor_instance = NBTEditor(self, setdata)
-        self.bottom_h.Add(self.operation.nbt_editor_instance, 130, wx.EXPAND, 21)
-        self.bottom_h.Add(self.operation.ui_entitie_choice_list, 50, wx.RIGHT, 0)
+        self.bottom_h.Add(
+            self.operation.ui_entitie_choice_list,
+            0,
+            wx.EXPAND | wx.RIGHT,
+            self.FromDIP(5),
+        )
+        self.bottom_h.Add(self.operation.nbt_editor_instance, 1, wx.EXPAND)
         self.bottom_h.Layout()
-        self.bottom_h.Fit(self)
-        self._sizer_v_main.Fit(self)
         self._sizer_v_main.Layout()
-        self.Fit()
         self.Layout()
 
-        # self.operation.nbt_editor_instance.SetValue(setdata.to_snbt(1))
-        # self.operation.nbt_editor_instance.
         (x, y, z) = setdata.get('Pos')[0], setdata.get('Pos')[1], setdata.get('Pos')[2]
         self.operation._X.SetLabel(str(x).replace("f", " X").replace("d", " X"))
         self.operation._Y.SetLabel(str(y).replace("f", " Y").replace("d", " Y"))
@@ -10922,10 +13895,6 @@ class EntitiePlugin(wx.Frame):
         self.world.level_wrapper.load_chunk(x, z, dimension).changed = True
         self.world.create_undo_point()
 
-    def _undo_it(self, _):
-        cx, cz = block_coords_to_chunk_coords(self.canvas.selection.selection_group.selection_boxes[0].min_x,
-                                              self.canvas.selection.selection_group.selection_boxes[0].min_z)
-        enty = self.canvas.world.get_native_entities(cx, cz, self.canvas.dimension)
 
     def _set_new_block(self, _):
         if self.canvas.selection.selection_group:
@@ -10993,7 +13962,7 @@ class EntitiePlugin(wx.Frame):
 
 class DataPopOutFrame(wx.Frame):
     def __init__(self, parent, found_data, page, platform, canvas, world):
-        super().__init__(parent, title="Data Viewer", size=(600, 600), style=wx.DEFAULT_FRAME_STYLE | wx.STAY_ON_TOP)
+        super().__init__(parent, title="Data Viewer", size=(600, 600), style=_float_on_parent_style())
         self.canvas = canvas
         self.world = world
         self.found_data = found_data
@@ -11209,7 +14178,7 @@ class DataPopOutFrame(wx.Frame):
                               style=(
                                       wx.MINIMIZE_BOX | wx.MAXIMIZE_BOX | wx.RESIZE_BORDER
                                       | wx.SYSTEM_MENU | wx.CAPTION | wx.CLOSE_BOX
-                                      | wx.CLIP_CHILDREN | wx.FRAME_FLOAT_ON_PARENT | wx.STAY_ON_TOP),
+                                      | wx.CLIP_CHILDREN | wx.FRAME_FLOAT_ON_PARENT),
                               name="Panel",
                               title="Cell (Row: " + str(event.GetRow()) + " Col: " + str(event.GetCol()) + ")")
         self.font = wx.Font(14, wx.FONTFAMILY_ROMAN, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL)
@@ -11474,7 +14443,6 @@ class ProcessAnvilBD:
             else:
                 location_dict[(rx, rz)][(xx, yy, zz)] = [(x, y, z)]
 
-        # self.progress_bar(total, cnt, update_interval=1000)
         for (rx, rz), chunk_data in location_dict.items():
             data = AnvilRegionInterface(self.get_dim_vpath_java_dir(rx, rz), mcc=True)
 
@@ -11613,7 +14581,6 @@ class ProcessAnvilBD:
 
         for (rx, rz), chunk_data in region_dict.items():
             world_data = AnvilRegion(self.get_dim_vpath_java_dir(rx, rz))
-            # chunk_changes = collections.defaultdict(list)
 
             for (cx, cy, cz), block_locations_data in chunk_data.items():
                 world_nbt = world_data.get_chunk_data(cx % 32, cz % 32)
@@ -11709,7 +14676,6 @@ class ProcessAnvilBD:
 
 class ProcessLevelDB:
     def __init__(self, found_data, parent=None, world=None, canvas=None):
-        # self.v_byte = 9
         self.pause_count = None
         self.block_version = None
         self.parent = parent
@@ -12041,7 +15007,7 @@ class ProcessLevelDB:
             return None, None
 
     def fast_apply(self, old=None, new=None, mode=None, name=None, ex_old=None, ex_new=None,
-                   ex_name=None):  # ,new,old, mode
+                   ex_name=None):
         ignore_property = False
         e_ignore_property = False
         if new and old and name:
@@ -12430,7 +15396,7 @@ def scale_bitmap(bitmap, width, height):
 class ImportImageSettings(wx.Frame):
     def __init__(self, parent, world=None):
         super(ImportImageSettings, self).__init__(parent, title="Import Settings", size=(300, 600),
-                                                  style=wx.DEFAULT_FRAME_STYLE | wx.STAY_ON_TOP)
+                                                  style=_float_on_parent_style())
         parent_position = parent.GetScreenPosition()
         self.world = world
         self.SetPosition(parent_position + (50, 50))
@@ -12556,8 +15522,6 @@ class ImportImageSettings(wx.Frame):
     def GetSelectedFrame(self):
         return self.rb_frame_type
 
-    def GetSelectedBlock(self):
-        pass
 
     def SetBlock(self, text):
         self.selected_block.SetLabel(text)
@@ -12565,7 +15529,7 @@ class ImportImageSettings(wx.Frame):
 class BuildWallSettings(wx.Frame):
     def __init__(self, parent, maps_img_data, world=None):
         super(BuildWallSettings, self).__init__(parent, title="Map Wall Settings", size=(300, 300),
-                                                style=wx.DEFAULT_FRAME_STYLE | wx.STAY_ON_TOP)
+                                                style=_float_on_parent_style())
         parent_position = parent.GetScreenPosition()
         self.world = world
         self.maps_img_data = maps_img_data
@@ -12914,8 +15878,8 @@ class ImageSourcePanel(wx.ScrolledWindow):
 
 class BuildMapWall(wx.Frame):
     def __init__(self, col, rows, map_img_list, parent=None):
-        super().__init__(parent=None, title="Build Map Wall", size=(800, 800),
-                         style=wx.DEFAULT_FRAME_STYLE | wx.STAY_ON_TOP)
+        super().__init__(parent=parent, title="Build Map Wall", size=(800, 800),
+                         style=_float_on_parent_style())
         self.parent = parent
         panel = wx.Panel(self)
         parent_position = parent.GetScreenPosition()
@@ -13277,7 +16241,6 @@ class JavaMapData:
         self.raw_data_chunks = None
         self.raw_data_entities = None
         sorted_blocks, rotation = self.parent.reorder_coordinates()
-        # blk_location_dict = collections.defaultdict(lambda: collections.defaultdict(list))
         location_dict = collections.defaultdict(lambda: collections.defaultdict(list))
         platform = self.world.level_wrapper.platform
         version = self.world.level_wrapper.version
@@ -13387,7 +16350,6 @@ class JavaMapData:
                 nbt = load(os.path.join(self.maps_path, map_))
                 if max(nbt['data'].get('colors').py_data) > 0:
                     self.all_map[map_[:-4]] = f"{self.maps_path}\\{map_}"
-                # if nbt['data'].get('xCenter').py_int != 2147483647 and nbt['data'].get('zCenter').py_int != 2147483647:
 
         for cmap_ in custom_map:
             if 'cmap_' in cmap_:
@@ -13658,10 +16620,7 @@ class BedrockMapData:
         pointing = self.parent.pointing.GetSelection()
         facing = self.parent.facing.GetSelection()
         cols, rows = self.cols_rows
-        # if self.parent.custom_map_loaded:
         #
-        # else:
-        #     custom_pre_fix = [x for x in self.maps_tobe.keys()][0]
         custom_pre_fix = self.get_available_custom_key
         self.custom_key_str = custom_pre_fix + ":" + self.parent.custom_map_name.GetValue()
         custom_key = self.custom_key_str.encode()
@@ -13787,9 +16746,6 @@ class BedrockMapData:
                 self.level_db.delete(key.encode())
         else:
             check_for_matching_map(key)
-        # self.all_map
-        # self.custom_map
-        # self.level_db.delete(k)
 
     def delete_all_maps(self):
 
@@ -13869,8 +16825,6 @@ class SetFrames(wx.Frame):
         self.world = world
         self.font = wx.Font(13, wx.FONTFAMILY_ROMAN, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL)
         self.SetFont(self.font)
-        # wx.Panel.__init__(self, parent)
-        # DefaultOperationUI.__init__(self, parent, canvas, world, options_path)
         self.platform = world.level_wrapper.platform
         self.world_version = world.level_wrapper.version
 
@@ -13892,18 +16846,20 @@ class SetFrames(wx.Frame):
         self._is_enabled = True
         self._moving = True
 
+        pad = self.FromDIP(6)
+        self.SetMinClientSize(self.FromDIP(wx.Size(465, 275)))
         self._sizer = wx.BoxSizer(wx.VERTICAL)
         self.SetSizer(self._sizer)
 
-        self.button_menu_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        self.button_menu_sizer = wx.GridSizer(0, 2, pad, pad)
         self.top_sizer = wx.BoxSizer(wx.HORIZONTAL)
         self.middle_sizer = wx.BoxSizer(wx.HORIZONTAL)
         self.bottom_sizer = wx.BoxSizer(wx.HORIZONTAL)
 
-        self._sizer.Add(self.button_menu_sizer)
-        self._sizer.Add(self.top_sizer)
-        self._sizer.Add(self.middle_sizer)
-        self._sizer.Add(self.bottom_sizer)
+        self._sizer.Add(self.button_menu_sizer, 0, wx.EXPAND | wx.ALL, pad)
+        self._sizer.Add(self.top_sizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, pad)
+        self._sizer.Add(self.middle_sizer, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, pad)
+        self._sizer.Add(self.bottom_sizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, pad)
         self.font = wx.Font(11, wx.FONTFAMILY_ROMAN, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL)
         self.SetFont(self.font)
         self.SetForegroundColour((0, 255, 0))
@@ -13911,52 +16867,51 @@ class SetFrames(wx.Frame):
         self.selected_file = None
         self.frame_types = ["Glow Frame", "Regular Frame"]
         self.rb_frame_type = "Glow Frame"
-        self._save_map_image = wx.Button(self, size=(70, 50), label="Save Map\n Image")
+        self._save_map_image = wx.Button(self, label="Save Map Image")
         self._save_map_image.Bind(wx.EVT_BUTTON, self.save_image_grid)
         self._save_map_image.Hide()
-        self._go_to_maps = wx.Button(self, size=(70, 50), label="Go To\n Location")
+        self._go_to_maps = wx.Button(self, label="Go To Location")
         self._go_to_maps.Bind(wx.EVT_BUTTON, self.go_to_maps)
         self._go_to_maps.Hide()
 
-        # self.top_sizer.Add(self.rb_frame_type, 0, wx.LEFT, 2)
 
-        self.top_sizer.Add(self._go_to_maps, 0, wx.LEFT, 170)
-        self.top_sizer.Add(self._save_map_image, 0, wx.LEFT, 5)
+        self.top_sizer.AddStretchSpacer()
+        self.top_sizer.Add(self._go_to_maps, 0, wx.RIGHT, pad)
+        self.top_sizer.Add(self._save_map_image, 0)
         real_maps = []
         if self.platform == 'java':
             real_maps = [x for x in self.map_data_manager.all_map.keys() if "map_-" not in x[0:5]]
         else:
             real_maps = [x for x in self.map_data_manager.all_map.keys() if "map_-" in x[0:5]]
-        self._map_list = wx.ListBox(self, style=wx.LB_SINGLE, size=(175, 165),
+        self._map_list = wx.ListBox(self, style=wx.LB_SINGLE,
+                                    size=self.FromDIP(wx.Size(205, 180)),
                                     choices=real_maps)
         self._map_list.Bind(wx.EVT_LISTBOX, self.on_focus_map_list)
 
-        self._custom_map_list = wx.ListBox(self, style=wx.LB_SINGLE, size=(175, 165),
+        self._custom_map_list = wx.ListBox(self, style=wx.LB_SINGLE,
+                                           size=self.FromDIP(wx.Size(205, 180)),
                                            choices=[x for x in self.map_data_manager.custom_map.keys()])
         self._custom_map_list.Bind(wx.EVT_LISTBOX, self.on_focus_custom_map_list)
 
-        self._import_image = wx.Button(self, size=(80, 50), label="Import \n and \n Settings")
+        self._import_image = wx.Button(self, label="Import and Settings")
         self._import_image.Bind(wx.EVT_BUTTON, self.import_image)
 
-        self._del_sel_map = wx.Button(self, size=(80, 50), label="Delete \n Selected")
+        self._del_sel_map = wx.Button(self, label="Delete Selected")
         self._del_sel_map.Bind(wx.EVT_BUTTON, self.del_sel_map)
 
-        self._build_map_wall = wx.Button(self, size=(80, 50), label="Build \n Map Wall")
+        self._build_map_wall = wx.Button(self, label="Build Map Wall")
         self._build_map_wall.Bind(wx.EVT_BUTTON, self.build_map_wall)
 
-        self._delete_all_maps = wx.Button(self, size=(80, 50), label="Delete All \n Maps")
+        self._delete_all_maps = wx.Button(self, label="Delete All Maps")
         self._delete_all_maps.Bind(wx.EVT_BUTTON, self._run_del_maps)
 
-        self.button_menu_sizer.Add(self._delete_all_maps, 0, wx.LEFT, 5)
+        self.button_menu_sizer.Add(self._delete_all_maps, 0, wx.EXPAND)
+        self.button_menu_sizer.Add(self._del_sel_map, 0, wx.EXPAND)
+        self.button_menu_sizer.Add(self._build_map_wall, 0, wx.EXPAND)
+        self.button_menu_sizer.Add(self._import_image, 0, wx.EXPAND)
 
-        self.button_menu_sizer.Add(self._del_sel_map, 0, wx.LEFT, 5)
-        self.button_menu_sizer.Add(self._build_map_wall, 0, wx.LEFT, 5)
-        self.button_menu_sizer.Add(self._import_image, 0, wx.LEFT, 5)
-        # self.button_menu_sizer.Add(self.apply_back_block, 0, wx.LEFT, 11)
-        # self.button_menu_sizer.Add(self._set_images_on_frames, 0, wx.LEFT, 11)
-
-        self.middle_sizer.Add(self._map_list)
-        self.middle_sizer.Add(self._custom_map_list)
+        self.middle_sizer.Add(self._map_list, 1, wx.EXPAND)
+        self.middle_sizer.Add(self._custom_map_list, 1, wx.EXPAND | wx.LEFT, pad)
 
         self._up = wx.Button(self, label="up", size=(40, 20))
         self._up.Bind(wx.EVT_BUTTON, self._boxUp)
@@ -14069,7 +17024,6 @@ class SetFrames(wx.Frame):
         total = len(self.selected_maps)
 
         for m in self.selected_maps:
-            # print(m,self.map_data_manager.all_map)
             self.map_data.append(self.map_data_manager.get_map_colors(m))
 
         def add_images(grid):
@@ -14156,7 +17110,7 @@ class SetFrames(wx.Frame):
         """Initialize the window and its components."""
         translation_manager = PyMCTranslate.new_translation_manager()
         self.window = wx.Frame(self, title="Choose back block", size=(500, 400),
-                               style=wx.DEFAULT_FRAME_STYLE | wx.STAY_ON_TOP)
+                               style=_float_on_parent_style())
         self.window.Centre(direction=wx.VERTICAL)
 
         self._block_define = BlockDefine(self.window, translation_manager, wx.VERTICAL,
@@ -14229,7 +17183,6 @@ class SetFrames(wx.Frame):
                 child.Hide()
 
     def get_block(self, event, data):
-        # print(data.block_name, data.properties)
         self.selected_block = data.block
 
         if self.world.level_wrapper.platform == 'bedrock':
@@ -14250,14 +17203,6 @@ class SetFrames(wx.Frame):
                                                         self.world.level_wrapper.version))
             self.selected_block = block
 
-            # if self.world.level_wrapper.platform == 'bedrock':
-            #     self.back_block = block
-            # else:
-            #     block_data = CompoundTag({'Name': StringTag("minecraft:" + block.base_name)})
-            #     if block.properties:
-            #         block_data['Properties'] = CompoundTag(block.properties)
-            #     self.back_block = block_data
-            #     print(data.block_name, data.properties)
 
         event.Skip()
 
@@ -14291,9 +17236,6 @@ class SetFrames(wx.Frame):
         evt.Skip()
         self.dlg = ImportImageSettings(self, world=self.world)
         self.dlg.Show()
-        # if dlg.ShowModal() == wx.ID_OK:
-        #     r, g, b, a = dlg.GetSelectedColor()
-        #     self.color = (r, g, b, a)
 
     def _on_pointer_change_blk(self, evt: PointChangeEvent):
 
@@ -14386,7 +17328,6 @@ class SetFrames(wx.Frame):
         total = len(self.selected_maps)
 
         for m in self.selected_maps:
-            # print(m,self.map_data_manager.all_map)
             self.map_data.append(self.map_data_manager.get_map_colors(m))
 
         def add_images(grid):
@@ -14702,7 +17643,6 @@ class FinderReplacer(wx.Frame):
         self.world = world
         self.font = wx.Font(13, wx.FONTFAMILY_ROMAN, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL)
         self.SetFont(self.font)
-        self.SetMinSize((320, 600))
 
         self.version = self.world.level_wrapper.version
         self.platform = self.world.level_wrapper.platform
@@ -14716,7 +17656,8 @@ class FinderReplacer(wx.Frame):
             self.find_level_data = ProcessAnvilBD(self.found_data, parent=self, world=self.world, canvas=self.canvas)
 
         self.Freeze()
-        self.font = wx.Font(14, wx.FONTFAMILY_ROMAN, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL)
+        # Use a compact frame font to keep inherited controls readable at high DPI.
+        self.font = wx.Font(11, wx.FONTFAMILY_ROMAN, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL)
         self.SetFont(self.font)
         self.SetForegroundColour((0, 255, 0))
         self.SetBackgroundColour((0, 0, 0))
@@ -14736,66 +17677,75 @@ class FinderReplacer(wx.Frame):
         self.above_grid = wx.BoxSizer(wx.HORIZONTAL)
         self.selectionOptions = wx.BoxSizer(wx.VERTICAL)
 
-        self._sizer.Add(self.top, 0, wx.TOP | wx.LEFT, 0)
-        self._sizer.Add(self.top_layer_two, 0, wx.TOP | wx.LEFT, 0)
-        self._sizer.Add(self.selectionOptions, 0, wx.TOP | wx.LEFT, 0)
-        self._sizer.Add(self.side_sizer, 1, wx.TOP | wx.LEFT, 0)
-        self._sizer.Add(self.saveload, 0, wx.TOP | wx.LEFT, 0)
-        self._sizer.Add(self.above_grid, 0, wx.TOP | wx.LEFT, 0)
+        # DPI-aware margins prevent labels from touching or clipping at the edge.
+        outer_pad = self.FromDIP(6)
+        row_gap = self.FromDIP(4)
+        self._sizer.Add(self.top, 0, wx.EXPAND | wx.TOP | wx.LEFT | wx.RIGHT, outer_pad)
+        self._sizer.Add(self.top_layer_two, 0, wx.EXPAND | wx.TOP | wx.LEFT | wx.RIGHT, row_gap)
+        self._sizer.Add(self.selectionOptions, 0, wx.EXPAND | wx.TOP | wx.LEFT | wx.RIGHT, row_gap)
+        self._sizer.Add(self.side_sizer, 0, wx.EXPAND | wx.TOP | wx.LEFT | wx.RIGHT, row_gap)
+        self._sizer.Add(self.saveload, 0, wx.EXPAND | wx.TOP | wx.LEFT | wx.RIGHT, row_gap)
+        self._sizer.Add(self.above_grid, 0, wx.EXPAND | wx.TOP | wx.LEFT | wx.RIGHT, row_gap)
+        self._sizer.Add(self.topTable, 0, wx.EXPAND | wx.TOP | wx.LEFT | wx.RIGHT | wx.BOTTOM, outer_pad)
 
-        self._sizer.Add(self.topTable, 0, wx.TOP | wx.LEFT, 0)
-
-        self._run_buttonF = wx.Button(self, label="Find", size=(70, 30))
+        self._run_buttonF = wx.Button(self, label="Find", size=self.FromDIP(wx.Size(70, 30)))
         self._run_buttonF.Bind(wx.EVT_BUTTON, self._start_the_search)
 
-        self.labelFindBlocks = wx.StaticText(self, label=" Search For Blocks:    ")
+        self.labelFindBlocks = wx.StaticText(self, label="Search for blocks:")
         self.labelFind = wx.StaticText(self, label="Find: ")
         self.labelRep = wx.StaticText(self, label="Replace: ")
         self.labelFind_e = wx.StaticText(self, label="Find Extra Block: ")
         self.labelRep_e = wx.StaticText(self, label="Replace Extra Block: ")
 
-        self.textSearch = wx.TextCtrl(self, style=wx.TE_LEFT | wx.TE_BESTWRAP, size=(180, 30))
-        self.textF = wx.TextCtrl(self, style=wx.TE_MULTILINE | wx.TE_BESTWRAP, size=(272, 120))
-        self.textF_Extra = wx.TextCtrl(self, style=wx.TE_MULTILINE | wx.TE_BESTWRAP, size=(272, 120))
-        self.textR = wx.TextCtrl(self, style=wx.TE_MULTILINE | wx.TE_BESTWRAP, size=(272, 120))
-        self.textR_Extra = wx.TextCtrl(self, style=wx.TE_MULTILINE | wx.TE_BESTWRAP, size=(272, 120))
-        self.grid_tc_find = wx.GridSizer(0, 2, 4, 4)
+        self.textSearch = wx.TextCtrl(self, style=wx.TE_LEFT | wx.TE_BESTWRAP, size=self.FromDIP(wx.Size(180, 28)))
+        editor_size = self.FromDIP(wx.Size(245, 64))
+        self.textF = wx.TextCtrl(self, style=wx.TE_MULTILINE | wx.TE_BESTWRAP, size=editor_size)
+        self.textF_Extra = wx.TextCtrl(self, style=wx.TE_MULTILINE | wx.TE_BESTWRAP, size=editor_size)
+        self.textR = wx.TextCtrl(self, style=wx.TE_MULTILINE | wx.TE_BESTWRAP, size=editor_size)
+        self.textR_Extra = wx.TextCtrl(self, style=wx.TE_MULTILINE | wx.TE_BESTWRAP, size=editor_size)
+        self.grid_tc_find = wx.FlexGridSizer(1, 2, self.FromDIP(4), self.FromDIP(8))
         self.grid_tc_find.Add(self.labelFindBlocks, 0, wx.LEFT, 0)
-        self.grid_tc_find.Add(self.textSearch, 0, wx.LEFT, -20)
-        self.top.Add(self.grid_tc_find, 0, wx.TOP, 20)
+        self.grid_tc_find.Add(self.textSearch, 0, wx.LEFT, 0)
+        self.top.Add(self.grid_tc_find, 0, wx.ALIGN_TOP | wx.TOP, self.FromDIP(4))
 
-        self.gsizer_but_and_chk = wx.GridSizer(3, 2, 5, 5)
+        self.gsizer_but_and_chk = wx.FlexGridSizer(3, 2, self.FromDIP(4), self.FromDIP(8))
 
-        self._position_selection = wx.Button(self, label="Position Selection", size=(138, 24))
+        self._position_selection = wx.Button(self, label="Position Selection", size=self.FromDIP(wx.Size(132, 28)))
         self._position_selection.Bind(wx.EVT_BUTTON, self.position_selection)
-        self._fast_apply = wx.Button(self, label="Fast_apply")
+        self._fast_apply = wx.Button(self, label="Fast Apply")
         self._SPACE_2 = wx.StaticText(self, label=" ")
         self._SPACE = wx.StaticText(self, label=" ")
         self._fast_apply.Bind(wx.EVT_BUTTON, self.fast_apply)
-        self._set_max_found = wx.StaticText(self, label="Pause After this many items Found:    ")
-        self.set_max_found_input = wx.TextCtrl(self, style=wx.TE_LEFT | wx.TE_BESTWRAP, size=(120, 22))
+        self._set_max_found = wx.StaticText(self, label="Pause after items found:")
+        self.set_max_found_input = wx.TextCtrl(self, style=wx.TE_LEFT | wx.TE_BESTWRAP, size=self.FromDIP(wx.Size(112, 26)))
         self.set_max_found_input.SetValue("12345")
         self._set_is_pop_out = wx.CheckBox(self, label='Pop Out table as window')
 
         self.gsizer_but_and_chk.Add(self._position_selection, 0, wx.LEFT, 5)
         self.gsizer_but_and_chk.Add(self._run_buttonF, 0, wx.LEFT, 0)
         self.gsizer_but_and_chk.Add(self._set_is_pop_out, 0, wx.LEFT, 15)
-        self.gsizer_but_and_chk.Add(self._fast_apply, 0, wx.LEFT, -50)
+        self.gsizer_but_and_chk.Add(self._fast_apply, 0, wx.LEFT, 0)
 
         self.gsizer_but_and_chk.Add(self._set_max_found, 0, wx.LEFT, 0)
         self.gsizer_but_and_chk.Add(self.set_max_found_input, 0, wx.LEFT, 0)
 
-        self.top_layer_two.Add(self.gsizer_but_and_chk, 0, wx.TOP, -70)
-        self.SearchFGrid = wx.GridSizer(4, 0, 0, 0)
-        self.SearchFGrid.Add(self.labelFind)
-        self.SearchFGrid.Add(self.textF, 0, wx.TOP, -50)
-        self.SearchFGrid.Add(self.labelRep)
-        self.SearchFGrid.Add(self.textR, 0, wx.TOP, -50)
-        self.SearchFGrid_Extra = wx.GridSizer(4, 0, 0, 0)
-        self.SearchFGrid_Extra.Add(self.labelFind_e)
-        self.SearchFGrid_Extra.Add(self.textF_Extra, 0, wx.TOP, -50)
-        self.SearchFGrid_Extra.Add(self.labelRep_e)
-        self.SearchFGrid_Extra.Add(self.textR_Extra, 0, wx.TOP, -50)
+        self.top_layer_two.Add(self.gsizer_but_and_chk, 0, wx.TOP, 0)
+        # These must not be GridSizers.  GridSizer gives every row the height
+        # of the multiline editors, which made the tiny label rows consume
+        # large blank areas at high DPI.
+        label_gap = self.FromDIP(3)
+        editor_gap = self.FromDIP(5)
+        self.SearchFGrid = wx.BoxSizer(wx.VERTICAL)
+        self.SearchFGrid.Add(self.labelFind, 0, wx.BOTTOM, label_gap)
+        self.SearchFGrid.Add(self.textF, 0)
+        self.SearchFGrid.Add(self.labelRep, 0, wx.TOP | wx.BOTTOM, editor_gap)
+        self.SearchFGrid.Add(self.textR, 0)
+
+        self.SearchFGrid_Extra = wx.BoxSizer(wx.VERTICAL)
+        self.SearchFGrid_Extra.Add(self.labelFind_e, 0, wx.BOTTOM, label_gap)
+        self.SearchFGrid_Extra.Add(self.textF_Extra, 0)
+        self.SearchFGrid_Extra.Add(self.labelRep_e, 0, wx.TOP | wx.BOTTOM, editor_gap)
+        self.SearchFGrid_Extra.Add(self.textR_Extra, 0)
 
         self.fr_sizer = wx.BoxSizer(wx.HORIZONTAL)
         if self.platform == 'java':
@@ -14805,9 +17755,9 @@ class FinderReplacer(wx.Frame):
             self.labelRep_e.Hide()
             self.fr_sizer.Add(self.SearchFGrid, 0, wx.LEFT, 120)
         else:
-            self.fr_sizer.Add(self.SearchFGrid, 0, wx.TOP, 0)
+            self.fr_sizer.Add(self.SearchFGrid, 0, wx.RIGHT, self.FromDIP(8))
 
-        self.fr_sizer.Add(self.SearchFGrid_Extra, 0, wx.TOP, 0)
+        self.fr_sizer.Add(self.SearchFGrid_Extra, 0)
         self.selectionOptions.Add(self.fr_sizer, 0, wx.TOP, 0)
 
         self.raw_apply = wx.Button(self, label="Direct Apply")
@@ -14815,21 +17765,19 @@ class FinderReplacer(wx.Frame):
         self.open_block_window = wx.Button(self, label="Find Replace Helper")
         self.open_block_window.Bind(wx.EVT_BUTTON, self.block_list)
 
-        self.labelfilter = wx.StaticText(self, label="Filter Whats selected:")
-        self.textfilter = wx.TextCtrl(self, style=wx.TE_LEFT | wx.TE_BESTWRAP, size=(70, 20))
+        self.labelfilter = wx.StaticText(self, label="Filter selected:")
+        self.textfilter = wx.TextCtrl(self, style=wx.TE_LEFT | wx.TE_BESTWRAP, size=self.FromDIP(wx.Size(70, 26)))
         self.selPosAbove = wx.Button(self, label="Select Found")
         self.selPosAbove.Bind(wx.EVT_BUTTON, self.select_the_blocks)
 
         self.listSearchType = {
             "Strict Selection": 0,
-            "Selection to Chucks": 1,
+            "Selection to Chunks": 1,
             "Every Chunk": 2
         }
 
         self.lst_mode = CustomRadioBox(self, 'Select Search Mode', [*self.listSearchType], (0, 255, 0))
 
-        # self.sel = wx.Button(self, label="Un/Select")
-        # self.sel.Bind(wx.EVT_BUTTON, self._sel)
         self.loadJ = wx.Button(self, label="Load")
         self.loadJ.Bind(wx.EVT_BUTTON, self.loadjson)
         self.saveJ = wx.Button(self, label="Save")
@@ -14847,15 +17795,15 @@ class FinderReplacer(wx.Frame):
         self.continue_button.Hide()
         self.saveload.Fit(self)
 
-        self.top.Add(self.lst_mode, 10, wx.LEFT, 35)
+        self.top.Add(self.lst_mode, 0, wx.LEFT, self.FromDIP(16))
         self.bottom_buttons = wx.BoxSizer(wx.HORIZONTAL)
-        self.bottom_buttons.Add(self.open_block_window, 0, wx.LEFT, 2)
-        self.bottom_buttons.Add(self.labelfilter, 0, wx.LEFT, 2)
-        self.bottom_buttons.Add(self.textfilter, 0, wx.LEFT, 2)
-        self.bottom_buttons.Add(self.selPosAbove, 0, wx.LEFT, 2)
+        self.bottom_buttons.Add(self.open_block_window, 0, wx.RIGHT, self.FromDIP(4))
+        self.bottom_buttons.Add(self.labelfilter, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, self.FromDIP(4))
+        self.bottom_buttons.Add(self.textfilter, 0, wx.RIGHT, self.FromDIP(4))
+        self.bottom_buttons.Add(self.selPosAbove, 0)
         self.selectionOptions.Add(self.bottom_buttons)
 
-        self._the_data = wx.grid.Grid(self, size=(520, 440), style=5)
+        self._the_data = wx.grid.Grid(self, size=self.FromDIP(wx.Size(520, 440)), style=5)
         self._the_data.Hide()
         self._sizer.Fit(self)
         self.toggle_count = 0
@@ -14965,22 +17913,29 @@ class FinderReplacer(wx.Frame):
         try:
             self.window.Hide()
             self.window.Close()
-        except:
+        except (AttributeError, RuntimeError):
             pass
-        self.window = wx.Frame(self.parent, title="Find Replace Helper", size=(880, 870),
-                               style=wx.DEFAULT_FRAME_STYLE | wx.STAY_ON_TOP)
+
+        self.window = wx.Frame(self.parent, title="Find Replace Helper",
+                               style=_float_on_parent_style())
         self.window.SetFont(self.font)
+        self.window.SetBackgroundColour(self.GetBackgroundColour())
+        pad = self.window.FromDIP(8)
 
-        self.window.SetBackgroundColour((120, 220, 255))
-
-        self.window.Centre(direction=wx.VERTICAL)
+        # Scroll the complete helper on smaller displays without clipping the
+        # block picker or the copy controls. Keep both columns in one layout.
+        self.helper_scroll = wx.ScrolledWindow(self.window, style=wx.VSCROLL | wx.HSCROLL)
+        self.helper_scroll.SetScrollRate(self.window.FromDIP(12), self.window.FromDIP(12))
+        outer = wx.BoxSizer(wx.VERTICAL)
+        outer.Add(self.helper_scroll, 1, wx.EXPAND)
+        self.window.SetSizer(outer)
         self.w_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        self.window.SetSizer(self.w_sizer)
-        if True:
-            self.chosen_platform = self.platform
-            self.chosen_name_space = "minecraft"
+        self.helper_scroll.SetSizer(self.w_sizer)
+
+        self.chosen_platform = self.platform
+        self.chosen_name_space = "minecraft"
         self._block_define = BlockDefine(
-            self.window,
+            self.helper_scroll,
             self.world.translation_manager,
             wx.VERTICAL,
             force_blockstate=False,
@@ -14988,28 +17943,31 @@ class FinderReplacer(wx.Frame):
             *([self.chosen_platform]),
             show_pick_block=True
         )
-
-        self._block_define.Bind(EVT_PROPERTIES_CHANGE, lambda event: self.get_block(event, self._block_define))
-        self.canvas.Bind(EVT_SELECTION_CHANGE, lambda event: self.set_block(event, self._block_define))
+        self._block_define.Bind(EVT_PROPERTIES_CHANGE,
+                                lambda event: self.get_block(event, self._block_define))
+        self.canvas.Bind(EVT_SELECTION_CHANGE,
+                         lambda event: self.set_block(event, self._block_define))
+        editor_size = self.window.FromDIP(wx.Size(300, 125))
         self.block_prop = wx.TextCtrl(
-            self.window, style=wx.TE_MULTILINE | wx.TE_BESTWRAP, size=(422, 280))
+            self.helper_scroll, style=wx.TE_MULTILINE | wx.TE_BESTWRAP, size=editor_size)
         self.block_prop_extra = wx.TextCtrl(
-            self.window, style=wx.TE_MULTILINE | wx.TE_BESTWRAP, size=(422, 280))
+            self.helper_scroll, style=wx.TE_MULTILINE | wx.TE_BESTWRAP, size=editor_size)
 
-        self.copy_find = wx.Button(self.window, label="Copy Block \n to Search")
+        self.copy_find = wx.Button(self.helper_scroll, label="Copy Block to Search")
         self.copy_find.Bind(wx.EVT_BUTTON, self.copy_find_select)
-        self.copy_find_ra = wx.Button(self.window, label="Copy to Find \n match all existing properties"
-                                      )
+        self.copy_find_ra = wx.Button(
+            self.helper_scroll, label="Copy to Find (match all existing properties)")
         self.copy_find_ra.Bind(wx.EVT_BUTTON, self.copy_find_select_ra)
-        self.copy_to_find_button = wx.Button(self.window, label="Copy To Find")
-        self.copy_to_find_extra_button = wx.Button(self.window, label="Copy To Find Extra")
-        self.copye_to_replace_button = wx.Button(self.window, label="Copy To Replace")
-        self.copye_to_replace_extra_button = wx.Button(self.window, label="Copy To Replace Extra")
-        self.copyex_to_replace_extra_button = wx.Button(self.window, label="Copy To Replace Extra")
+        self.copy_to_find_button = wx.Button(self.helper_scroll, label="Copy To Find")
+        self.copy_to_find_extra_button = wx.Button(self.helper_scroll, label="Copy To Find Extra")
+        self.copye_to_replace_button = wx.Button(self.helper_scroll, label="Copy To Replace")
+        self.copye_to_replace_extra_button = wx.Button(self.helper_scroll, label="Copy To Replace Extra")
+        self.copyex_to_replace_extra_button = wx.Button(self.helper_scroll, label="Copy To Replace Extra")
 
-        self.label_info = wx.StaticText(self.window, label="You Can also Select A Block To get the info")
-        self.block_info = wx.StaticText(self.window, label="Block")
-        self.extrablock_info = wx.StaticText(self.window, label="Extra Block")
+        self.label_info = wx.StaticText(
+            self.helper_scroll, label="Select a block to view and copy its properties")
+        self.block_info = wx.StaticText(self.helper_scroll, label="Block")
+        self.extrablock_info = wx.StaticText(self.helper_scroll, label="Extra Block")
 
         self.copy_to_find_button.Bind(wx.EVT_BUTTON, self.copy_to_find)
         self.copy_to_find_extra_button.Bind(wx.EVT_BUTTON, self.copy_to_find_extra)
@@ -15017,50 +17975,51 @@ class FinderReplacer(wx.Frame):
         self.copye_to_replace_extra_button.Bind(wx.EVT_BUTTON, self.copy_to_repace_extra)
         self.copyex_to_replace_extra_button.Bind(wx.EVT_BUTTON, self.copy_extra_to_find_extra)
 
-        self.grid_top_ew = wx.GridSizer(1, 2, 0, 0)
+        self.grid_left = wx.BoxSizer(wx.VERTICAL)
+        self.grid_left.Add(self.copy_find, 0, wx.EXPAND | wx.BOTTOM, pad)
+        self.grid_left.Add(self._block_define, 0, wx.EXPAND)
 
-        self.grid_top_ew.Add(self.copy_to_find_button, 0, wx.LEFT, 0)
-        self.grid_top_ew.Add(self.copy_to_find_extra_button, 0, wx.LEFT, 0)
+        self.grid_top_ew = wx.BoxSizer(wx.HORIZONTAL)
+        self.grid_top_ew.Add(self.copy_to_find_button, 1, wx.EXPAND)
+        self.grid_bot_ew = wx.BoxSizer(wx.HORIZONTAL)
+        self.grid_bot_ew.Add(self.copye_to_replace_button, 1, wx.EXPAND)
 
-        self.grid_bot_ew = wx.GridSizer(1, 2, 0, 0)
-        self.grid_bot_ew.Add(self.copye_to_replace_button, 0, wx.LEFT, 0)
-        self.grid_bot_ew.Add(self.copye_to_replace_extra_button, 0, wx.LEFT, 0)
-
-        self.grid_box_pop = wx.BoxSizer(wx.VERTICAL)
         if self.platform == 'java':
             self.extrablock_info.Hide()
             self.copy_to_find_extra_button.Hide()
             self.copye_to_replace_extra_button.Hide()
             self.copyex_to_replace_extra_button.Hide()
             self.block_prop_extra.Hide()
-            self.grid_box_pop.Add(self.label_info, 0, wx.TOP, 100)
-            self.grid_box_pop.Add(self.copy_find_ra, 0, wx.TOP, 0)
-
-            self.window.SetSize((880, 770))
-
         else:
-            self.grid_box_pop.Add(self.label_info, 0, wx.TOP, 20)
-            self.grid_box_pop.Add(self.copy_find_ra, 0, wx.TOP, 0)
+            self.grid_top_ew.Add(self.copy_to_find_extra_button, 1, wx.EXPAND | wx.LEFT, pad)
+            self.grid_bot_ew.Add(self.copye_to_replace_extra_button, 1, wx.EXPAND | wx.LEFT, pad)
 
-        self.grid_box_pop.Add(self.grid_top_ew)
-        self.grid_box_pop.Add(self.block_info)
-        self.grid_box_pop.Add(self.block_prop)
-        self.grid_box_pop.Add(self.grid_bot_ew)
+        self.grid_box_pop = wx.BoxSizer(wx.VERTICAL)
+        self.grid_box_pop.Add(self.label_info, 0, wx.BOTTOM, pad // 2)
+        self.grid_box_pop.Add(self.copy_find_ra, 0, wx.EXPAND | wx.BOTTOM, pad)
+        self.grid_box_pop.Add(self.grid_top_ew, 0, wx.EXPAND | wx.BOTTOM, pad // 2)
+        self.grid_box_pop.Add(self.block_info, 0, wx.BOTTOM, pad // 2)
+        self.grid_box_pop.Add(self.block_prop, 1, wx.EXPAND | wx.BOTTOM, pad)
+        self.grid_box_pop.Add(self.grid_bot_ew, 0, wx.EXPAND | wx.BOTTOM, pad // 2)
+        if self.platform != 'java':
+            self.grid_box_pop.Add(self.extrablock_info, 0, wx.BOTTOM, pad // 2)
+            self.grid_box_pop.Add(self.block_prop_extra, 1, wx.EXPAND | wx.BOTTOM, pad // 2)
+            self.grid_box_pop.Add(self.copyex_to_replace_extra_button,
+                                  0, wx.ALIGN_RIGHT | wx.TOP, pad // 2)
 
-        self.grid_box_pop.Add(self.extrablock_info, 0, wx.TOP, 60)
-        self.grid_box_pop.Add(self.block_prop_extra, 0, wx.TOP, 1)
-        self.grid_box_pop.Add(self.copyex_to_replace_extra_button, wx.TOP, 5)
-
-        self.grid_left = wx.GridSizer(2, 1, -470, 0)
-        self.grid_left.Add(self.copy_find, 0, wx.LEFT, 120)
-        self.grid_left.Add(self._block_define, 0, wx.TOP, -55)
-        self.w_sizer.Add(self.grid_left)
-        self.w_sizer.Add(self.grid_box_pop)
+        self.w_sizer.Add(self.grid_left, 0, wx.EXPAND | wx.ALL, pad)
+        self.w_sizer.Add(self.grid_box_pop, 1,
+                         wx.EXPAND | wx.TOP | wx.RIGHT | wx.BOTTOM, pad)
 
         self._block_define.Fit()
         self._block_define.Layout()
-        self.grid_box_pop.Layout()
-
+        self.window.SetMinSize(self.window.FromDIP(wx.Size(580, 330)))
+        self.window.SetClientSize(self.window.FromDIP(
+            wx.Size(720, 470 if self.platform != 'java' else 410)))
+        self.window.Layout()
+        self.helper_scroll.FitInside()
+        self.window.CentreOnParent()
+        _clamp_window_to_display(self.window)
         self.window.Bind(wx.EVT_CLOSE, lambda event: self.OnClose(event))
         self.window.Enable()
         self.window.Show(True)
@@ -15316,7 +18275,6 @@ class FinderReplacer(wx.Frame):
                 if self.chunks_done:
                     self.Freeze()
                     self.continue_button.Show()
-                    # self.check_for_pages()
                     self.Layout()
                     self.Thaw()
             else:
@@ -15325,7 +18283,6 @@ class FinderReplacer(wx.Frame):
                 if self.chunks_done:
                     self.Freeze()
                     self.continue_button.Show()
-                    # self.check_for_pages()
                     self.Layout()
                     self.Thaw()
 
@@ -15411,13 +18368,11 @@ class FinderReplacer(wx.Frame):
                 self.Fit()
                 self.Layout()
                 self.parent.Layout()
-                # self._the_data.Destroy()
             else:
 
                 self.topTable.Detach(self._the_data)
                 self._the_data.Hide()
-                # self._the_data.Destroy()
-                self._the_data = wx.grid.Grid(self, size=(540, 540), style=5)
+                self._the_data = wx.grid.Grid(self, size=self.FromDIP(wx.Size(540, 540)), style=5)
         except:
             pass
 
@@ -15439,7 +18394,6 @@ class FinderReplacer(wx.Frame):
             self._the_data.SetColLabelValue(5, "Entity Data")
 
             for ind, (xyz, data) in enumerate(self.found_data.get_page(page).items()):
-                # self.progress_bar(tableCount, ind, text=f'page:{ind}/{tableCount}')
                 self._the_data.SetCellValue(ind, 0, str(xyz[0]))
                 self._the_data.SetCellValue(ind, 1, str(xyz[1]))
                 self._the_data.SetCellValue(ind, 2, str(xyz[2]))
@@ -15448,7 +18402,6 @@ class FinderReplacer(wx.Frame):
                 self._the_data.SetCellBackgroundColour(ind, 2, "#118ab2")
                 self._the_data.SetCellValue(ind, 3, data['block_data'].to_snbt(1))
                 self._the_data.SetCellBackgroundColour(ind, 3, "#8ecae6")
-                # self._the_data.SetCellBackgroundColour(ind, 4, "#95d5b2")
                 self._the_data.SetCellValue(ind, 4, data['extra_block'].to_snbt(1))
                 self._the_data.SetCellValue(ind, 5, data['entity_data'].to_snbt(1))
 
@@ -15486,11 +18439,11 @@ class FinderReplacer(wx.Frame):
             self.canvas.camera.set_location((ox, oy, oz))
             self.canvas.camera._notify_moved()
 
-        self.frame = wx.Frame(self.parent, id=wx.ID_ANY, pos=wx.DefaultPosition, size=(425, 400),
+        self.frame = wx.Frame(self.parent, id=wx.ID_ANY, pos=wx.DefaultPosition, size=self.FromDIP(wx.Size(425, 400)),
                               style=(
                                       wx.MINIMIZE_BOX | wx.MAXIMIZE_BOX | wx.RESIZE_BORDER
                                       | wx.SYSTEM_MENU | wx.CAPTION | wx.CLOSE_BOX
-                                      | wx.CLIP_CHILDREN | wx.FRAME_FLOAT_ON_PARENT | wx.STAY_ON_TOP),
+                                      | wx.CLIP_CHILDREN | wx.FRAME_FLOAT_ON_PARENT),
                               name="Panel",
                               title="Cell (Row: " + str(event.GetRow()) + " Col: " + str(event.GetCol()) + ")")
         self.frame.SetFont(self.font)
@@ -15507,7 +18460,7 @@ class FinderReplacer(wx.Frame):
         sizer_P.Add(sizer_H)
         sizer_P.Add(sizer_H2)
 
-        self.textGrid = wx.TextCtrl(self.frame, style=wx.TE_MULTILINE | wx.TE_BESTWRAP, size=(400, 550))
+        self.textGrid = wx.TextCtrl(self.frame, style=wx.TE_MULTILINE | wx.TE_BESTWRAP, size=self.FromDIP(wx.Size(400, 550)))
         copy_to_find = wx.Button(self.frame, label="Copy To Find")
         copy_to_find.Bind(wx.EVT_BUTTON, self.copy_text_to_find)
         copy_to_replace = wx.Button(self.frame, label="Copy To Replace")
@@ -15670,7 +18623,6 @@ class FinderReplacer(wx.Frame):
     def bind_events(self):
         super().bind_events()
         self._selection.bind_events()
-        # self._selection.enable()
 
     def enable(self):
         self._selection = BlockSelectionBehaviour(self.canvas)
@@ -15678,163 +18630,197 @@ class FinderReplacer(wx.Frame):
 
 class SetPlayersData(wx.Frame):
     def __init__(self, parent, canvas, world, *args, **kw):
-        super(SetPlayersData, self).__init__(parent, *args, **kw,
-                                            style=(wx.MINIMIZE_BOX | wx.MAXIMIZE_BOX | wx.RESIZE_BORDER |
-                                                   wx.SYSTEM_MENU | wx.CAPTION | wx.CLOSE_BOX | wx.CLIP_CHILDREN |
-                                                   wx.FRAME_FLOAT_ON_PARENT),
-                                            title="Set Player Data and Achievements")
+        super(SetPlayersData, self).__init__(
+            parent,
+            *args,
+            **kw,
+            style=(
+                wx.MINIMIZE_BOX
+                | wx.MAXIMIZE_BOX
+                | wx.RESIZE_BORDER
+                | wx.SYSTEM_MENU
+                | wx.CAPTION
+                | wx.CLOSE_BOX
+                | wx.CLIP_CHILDREN
+                | wx.FRAME_FLOAT_ON_PARENT
+            ),
+            title="Set Player Data",
+        )
 
         self.parent = parent
-
         self.canvas = canvas
         self.world = world
         self.platform = self.world.level_wrapper.platform
-        self.font = wx.Font(13, wx.FONTFAMILY_ROMAN, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL)
+        self.data = None
+        self.Freeze()
+
+        self.font = wx.Font(
+            11,
+            wx.FONTFAMILY_ROMAN,
+            wx.FONTSTYLE_NORMAL,
+            wx.FONTWEIGHT_NORMAL,
+        )
+        self.SetFont(self.font)
         self.SetForegroundColour((0, 255, 0))
         self.SetBackgroundColour((0, 0, 0))
-        self.SetFont(self.font)
-        self.SetMinSize((320, 600))
-        self.Freeze()
-        self.data = None
+
+        pad = self.FromDIP(6)
+        control_height = self.FromDIP(28)
         self._sizer = wx.BoxSizer(wx.VERTICAL)
         self.SetSizer(self._sizer)
-        self.info = wx.StaticText(self, wx.LEFT)
-        self.info.SetLabel("Select player:")
+
+        self.info = wx.StaticText(self, label="Select player:")
         if self.platform == "bedrock":
-            self.infoRe = wx.StaticText(self, wx.LEFT)
-            self.infoRe.SetLabel("Remove any Behavior Packs!")
-            self.infoRai = wx.StaticText(self, wx.LEFT)
-            self.infoRai.SetLabel(".. Personal GameMode?")
-        self.XL = wx.StaticText(self, wx.LEFT)
-        self.XL.SetLabel("X:")
-        self.YL = wx.StaticText(self, wx.LEFT)
-        self.YL.SetLabel("Y:")
-        self.ZL = wx.StaticText(self, wx.LEFT)
-        self.ZL.SetLabel("Z:")
-        self.facingL = wx.StaticText(self, wx.LEFT)
-        self.facingL.SetLabel("Facing:")
-        self.lookingL = wx.StaticText(self, wx.LEFT)
-        self.lookingL.SetLabel("Looking:")
-        self.X = wx.TextCtrl(
-            self, style=wx.TE_LEFT | wx.TE_BESTWRAP, size=(150, 20),
+            self.infoRe = wx.StaticText(self, label="Remove any Behavior Packs!")
+            self.infoRai = wx.StaticText(self, label="Personal GameMode?")
+
+        self.XL = wx.StaticText(self, label="X:")
+        self.YL = wx.StaticText(self, label="Y:")
+        self.ZL = wx.StaticText(self, label="Z:")
+        self.facingL = wx.StaticText(self, label="Facing:")
+        self.lookingL = wx.StaticText(self, label="Looking:")
+
+        field_size = self.FromDIP(wx.Size(150, 28))
+        self.X = wx.TextCtrl(self, style=wx.TE_LEFT, size=field_size)
+        self.Y = wx.TextCtrl(self, style=wx.TE_LEFT, size=field_size)
+        self.Z = wx.TextCtrl(self, style=wx.TE_LEFT, size=field_size)
+        self.facing = wx.TextCtrl(self, style=wx.TE_LEFT, size=field_size)
+        self.looking = wx.TextCtrl(self, style=wx.TE_LEFT, size=field_size)
+
+        self.dimDict = {"Overworld": 0, "Nether": 1, "End": 2}
+        self.dim = CustomRadioBox(
+            self,
+            "Select Dimension",
+            list(self.dimDict.keys()),
+            (0, 255, 0),
+            md=3,
         )
-        self.Y = wx.TextCtrl(
-            self, style=wx.TE_LEFT | wx.TE_BESTWRAP, size=(150, 20),
-        )
-        self.Z = wx.TextCtrl(
-            self, style=wx.TE_LEFT | wx.TE_BESTWRAP, size=(150, 20),
-        )
-        self.facing = wx.TextCtrl(
-            self, style=wx.TE_LEFT | wx.TE_BESTWRAP, size=(150, 20),
-        )
-        self.looking = wx.TextCtrl(
-            self, style=wx.TE_LEFT | wx.TE_BESTWRAP, size=(150, 20),
-        )
-        self.dimDict = {
-            "Overworld": 0,
-            "Nether": 1,
-            "End": 2
-        }
-        # self.lst_mode = CustomRadioBox(self, 'Select Search Mode', [*self.listSearchType], (0, 255, 0))
-        self.dim = CustomRadioBox(self, 'Select Dimension', list(self.dimDict.keys()), (0, 255, 0), sty=1)
-        self.apply = wx.Button(self, size=(60, 30), label="Apply")
+
+        self.apply = wx.Button(self, label="Apply")
         if self.platform == "bedrock":
             self.apply.Bind(wx.EVT_BUTTON, self.savePosData)
         else:
             self.apply.Bind(wx.EVT_BUTTON, self.savePosDataJava)
-        self.getSet = wx.Button(self, size=(155, 25), label="Get Current Position")
+
+        self.getSet = wx.Button(self, label="Get Current Position")
         self.getSet.Bind(wx.EVT_BUTTON, self.getsetCurrentPos)
-        self.tpUser = wx.CheckBox(self, size=(155, 25), label="Enable TP for select")
-        self.fcords = wx.CheckBox(self, size=(155, 25), label="lock Cord Values")
+        self.tpUser = wx.CheckBox(self, label="Enable teleport to selected player")
+        self.fcords = wx.CheckBox(self, label="Lock coordinate values")
 
+        self.set_hardcore = None
         if self.platform == "bedrock":
-            self.achieve = wx.Button(self, size=(165, 25), label="Re-enable achievements")
-            self.is_hardcore = self.world.level_wrapper.root_tag.get('IsHardcore', None)
-
+            self.achieve = wx.Button(self, label="Re-enable Achievements")
+            self.achieve.Bind(wx.EVT_BUTTON, self.re_enable_achievements)
+            self.is_hardcore = self.world.level_wrapper.root_tag.get("IsHardcore", None)
 
             if self.is_hardcore == 1:
-                self.set_hardcore = wx.Button(self, size=(165, 25), label="Disable Hardcore")
-                self.set_hardcore.Bind(wx.EVT_BUTTON, self.set_hardcore_mode)
-                self._sizer.Add(self.set_hardcore, 0, wx.LEFT, 0)
-            if self.is_hardcore == 0:
-                self.set_hardcore = wx.Button(self, size=(165, 25), label="Enable Hardcore")
-                self.set_hardcore.Bind(wx.EVT_BUTTON, self.set_hardcore_mode)
-                self._sizer.Add(self.set_hardcore, 0, wx.LEFT, 0)
-            # self.make_hardcore = wx.Button(self, size=(165, 25), label="Make Hardcore")
-            self.achieve.Bind(wx.EVT_BUTTON, self.re_enable_achievements)
+                self.set_hardcore = wx.Button(self, label="Disable Hardcore")
+            elif self.is_hardcore == 0:
+                self.set_hardcore = wx.Button(self, label="Enable Hardcore")
 
-        self.listRadio = {
-            "Survival": 0,
-            "Creative": 1
-        }
+            if self.set_hardcore is not None:
+                self.set_hardcore.Bind(wx.EVT_BUTTON, self.set_hardcore_mode)
+
+        self.listRadio = {"Survival": 0, "Creative": 1}
         self.listRadiojava = {
             "Survival": 0,
             "Creative": 1,
             "Adventure": 2,
             "Spectator": 3,
-            "Recover Hardcore World": 4
+            "Recover Hardcore World": 4,
         }
-        if self.platform == "bedrock":
-            self.gm_mode = CustomRadioBox(self, 'Both Do NOT disable achievements',
-                                          list(self.listRadio.keys()), (0, 255, 0), sty=wx.RA_SPECIFY_ROWS | 1)
-        if self.platform == "java":
-            self.gm_mode = CustomRadioBox(self, 'Set Gamemode', list(self.listRadiojava.keys()),
-                                          (0, 255, 0))
 
-        player = ['']
         if self.platform == "bedrock":
-            for x in self.world.players.all_player_ids():
-                if "server_" in x or "~" in x:
-                    if "server_" in x:
-                        player.append("player_" + x)
-                    else:
-                        player.append(x)
+            self.gm_mode = CustomRadioBox(
+                self,
+                "Both do NOT disable achievements",
+                list(self.listRadio.keys()),
+                (0, 255, 0),
+                md=2,
+            )
         else:
-            for x in self.world.players.all_player_ids():
-                player.append(x)
+            self.gm_mode = CustomRadioBox(
+                self,
+                "Set Gamemode",
+                list(self.listRadiojava.keys()),
+                (0, 255, 0),
+                sty=wx.RA_SPECIFY_ROWS,
+                md=3,
+            )
 
-        self.playerlist = wx.ListBox(self, size=(160, 95), choices=player)
+        player = [""]
+        if self.platform == "bedrock":
+            for player_id in self.world.players.all_player_ids():
+                if "server_" in player_id or "~" in player_id:
+                    if "server_" in player_id:
+                        player.append("player_" + player_id)
+                    else:
+                        player.append(player_id)
+        else:
+            player.extend(self.world.players.all_player_ids())
+
+        self.playerlist = wx.ListBox(
+            self,
+            size=self.FromDIP(wx.Size(220, 82)),
+            choices=player,
+        )
         self.playerlist.SetSelection(0)
-        self.playerlistrun(None)
         self.playerlist.Bind(wx.EVT_LISTBOX, self.playerlistrun)
 
         if self.platform == "bedrock":
-            self._sizer.Add(self.infoRe, 0, wx.LEFT, 10)
-            self._sizer.Add(self.achieve, 0, wx.LEFT, 20)
-        self._sizer.Add(self.info, 0, wx.LEFT, 10)
-        self._sizer.Add(self.playerlist, 0, wx.LEFT, 10)
+            self._sizer.Add(self.infoRe, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
 
-        self._sizer.Add(self.tpUser, 0, wx.LEFT, 20)
+            account_row = wx.BoxSizer(wx.HORIZONTAL)
+            account_row.Add(self.achieve, 1, wx.RIGHT, pad)
+            if self.set_hardcore is not None:
+                account_row.Add(self.set_hardcore, 1)
+            self._sizer.Add(account_row, 0, wx.EXPAND | wx.ALL, pad)
 
-        self._sizer.Add(self.fcords, 0, wx.LEFT, 20)
-        self._sizer.Add(self.getSet, 0, wx.LEFT, 40)
-        self.Grid = wx.GridSizer(5, 2, 0, 0)
-        self.Grid.Add(self.XL, 0, wx.LEFT, 5)
-        self.Grid.Add(self.X, 0, wx.LEFT, -60)
-        self.Grid.Add(self.YL, 0, wx.LEFT, 5)
-        self.Grid.Add(self.Y, 0, wx.LEFT, -60)
-        self.Grid.Add(self.ZL, 0, wx.LEFT, 5)
-        self.Grid.Add(self.Z, 0, wx.LEFT, -60)
+        self._sizer.Add(self.info, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
+        self._sizer.Add(
+            self.playerlist,
+            0,
+            wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM,
+            pad,
+        )
 
-        self.Grid.Add(self.facingL, 0, wx.LEFT, 10)
-        self.Grid.Add(self.facing, 0, wx.LEFT, -40)
-        self.Grid.Add(self.lookingL, 0, wx.LEFT, 10)
-        self.Grid.Add(self.looking, 0, wx.LEFT, -40)
+        option_row = wx.BoxSizer(wx.HORIZONTAL)
+        option_row.Add(self.tpUser, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, pad * 2)
+        option_row.Add(self.fcords, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, pad * 2)
+        option_row.AddStretchSpacer(1)
+        option_row.Add(self.getSet, 0)
+        self._sizer.Add(option_row, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, pad)
 
-        self._sizer.Add(self.Grid)
-        self.Grid.Fit(self)
+        self.Grid = wx.FlexGridSizer(rows=5, cols=2, vgap=pad, hgap=pad)
+        self.Grid.AddGrowableCol(1, 1)
+        for label, control in (
+            (self.XL, self.X),
+            (self.YL, self.Y),
+            (self.ZL, self.Z),
+            (self.facingL, self.facing),
+            (self.lookingL, self.looking),
+        ):
+            self.Grid.Add(label, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, pad)
+            self.Grid.Add(control, 1, wx.EXPAND)
+        self._sizer.Add(self.Grid, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, pad)
 
-        self._sizer.Add(self.dim, 0, wx.LEFT, 0)
+        mode_row = wx.BoxSizer(wx.HORIZONTAL)
+        mode_row.Add(self.dim, 1, wx.EXPAND | wx.RIGHT, pad)
+        mode_row.Add(self.gm_mode, 1, wx.EXPAND)
+        self._sizer.Add(mode_row, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, pad)
 
         if self.platform == "bedrock":
-            self._sizer.Add(self.infoRai, 0, wx.LEFT, 0)
+            self._sizer.Add(self.infoRai, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
 
+        apply_row = wx.BoxSizer(wx.HORIZONTAL)
+        apply_row.AddStretchSpacer(1)
+        apply_row.Add(self.apply, 0)
+        self._sizer.Add(apply_row, 0, wx.EXPAND | wx.ALL, pad)
 
-        self._sizer.Add(self.gm_mode, 0, wx.LEFT, 0)
+        self.playerlistrun(None)
 
-        self._sizer.Add(self.apply, 0, wx.LEFT, 160)
         self._sizer.Fit(self)
-
+        self.SetMinSize(self.GetSize())
         self.Layout()
         self.Thaw()
 
@@ -16043,11 +19029,6 @@ class SetPlayersData(wx.Frame):
                       "\nNOTE: You MUST CLOSE This world Before Opening in MineCraft",
                       "INFO", wx.OK | wx.ICON_INFORMATION)
 
-    # def saveData(self, head, data):
-    #     with open(self.world.level_path + "\\" + "level.dat", "wb") as f:
-    #         f.write(head + data)
-    #         wx.MessageBox("Achievements are Re-enable",
-    #                       "INFO", wx.OK | wx.ICON_INFORMATION)
     def set_hardcore_mode(self, _):
         self.is_hardcore = self.world.level_wrapper.root_tag.get('IsHardcore', None)
         if self.is_hardcore == 1:
@@ -16071,117 +19052,177 @@ class SetPlayersData(wx.Frame):
 
 class HardCodedSpawns(wx.Frame):
     def __init__(self, parent, canvas, world, *args, **kw):
-        super(HardCodedSpawns, self).__init__(parent, *args, **kw,
-                                              style=(wx.MINIMIZE_BOX | wx.MAXIMIZE_BOX | wx.RESIZE_BORDER |
-                                                     wx.SYSTEM_MENU | wx.CAPTION | wx.CLOSE_BOX | wx.CLIP_CHILDREN |
-                                                     wx.FRAME_FLOAT_ON_PARENT),
-                                              title="Hard Coded Spawn Editor")
+        super(HardCodedSpawns, self).__init__(
+            parent,
+            *args,
+            **kw,
+            style=(
+                wx.MINIMIZE_BOX
+                | wx.MAXIMIZE_BOX
+                | wx.RESIZE_BORDER
+                | wx.SYSTEM_MENU
+                | wx.CAPTION
+                | wx.CLOSE_BOX
+                | wx.CLIP_CHILDREN
+                | wx.FRAME_FLOAT_ON_PARENT
+            ),
+            title="Hard Coded Spawn Editor",
+        )
 
         self.parent = parent
-
         self.canvas = canvas
         self.world = world
-        self.font = wx.Font(13, wx.FONTFAMILY_ROMAN, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL)
+        self.font = wx.Font(
+            11,
+            wx.FONTFAMILY_ROMAN,
+            wx.FONTSTYLE_NORMAL,
+            wx.FONTWEIGHT_NORMAL,
+        )
         self.SetFont(self.font)
-        self.SetMinSize((320, 600))
         self.SetForegroundColour((0, 255, 0))
         self.SetBackgroundColour((0, 0, 0))
-        self.type_dic = {1: "Fortress", 3: "Monument", 5: "Villager Outpost", 2: "Witch Hut"}
+        self.type_dic = {
+            1: "Fortress",
+            3: "Monument",
+            5: "Villager Outpost",
+            2: "Witch Hut",
+        }
         self.abc = []
         self.cord_dic = collections.defaultdict(list)
         self.Freeze()
+
+        pad = self.FromDIP(6)
         self.sizer = wx.BoxSizer(wx.HORIZONTAL)
         self.side = wx.BoxSizer(wx.VERTICAL)
         self.SetSizer(self.sizer)
+
         if self.world.level_wrapper.platform == "java":
-            wx.MessageBox("Java Not Supported", "Not Supported", wx.OK | wx.ICON_INFORMATION)
+            wx.MessageBox(
+                "Java Not Supported",
+                "Not Supported",
+                wx.OK | wx.ICON_INFORMATION,
+            )
         else:
-            self._up = wx.Button(self, label="Up", size=(36, 35))
-            self._up.Bind(wx.EVT_BUTTON, self._boxUp('m'))
-            self._down = wx.Button(self, label="Down", size=(36, 35))
-            self._down.Bind(wx.EVT_BUTTON, self._boxDown('m'))
-            self._east = wx.Button(self, label="East", size=(36, 35))
-            self._east.Bind(wx.EVT_BUTTON, self._boxEast('m'))
-            self._west = wx.Button(self, label="West", size=(36, 35))
-            self._west.Bind(wx.EVT_BUTTON, self._boxWest('m'))
-            self._north = wx.Button(self, label="North", size=(36, 35))
-            self._north.Bind(wx.EVT_BUTTON, self._boxNorth('m'))
-            self._south = wx.Button(self, label="South", size=(36, 35))
-            self._south.Bind(wx.EVT_BUTTON, self._boxSouth('m'))
+            move_size = self.FromDIP(wx.Size(76, 32))
+            self._up = wx.Button(self, label="Up", size=move_size)
+            self._down = wx.Button(self, label="Down", size=move_size)
+            self._east = wx.Button(self, label="East", size=move_size)
+            self._west = wx.Button(self, label="West", size=move_size)
+            self._north = wx.Button(self, label="North", size=move_size)
+            self._south = wx.Button(self, label="South", size=move_size)
+
+            self._up.Bind(wx.EVT_BUTTON, self._boxUp("m"))
+            self._down.Bind(wx.EVT_BUTTON, self._boxDown("m"))
+            self._east.Bind(wx.EVT_BUTTON, self._boxEast("m"))
+            self._west.Bind(wx.EVT_BUTTON, self._boxWest("m"))
+            self._north.Bind(wx.EVT_BUTTON, self._boxNorth("m"))
+            self._south.Bind(wx.EVT_BUTTON, self._boxSouth("m"))
 
             self.lbct = wx.StaticText(self, label="Step:")
-
-            self.control = wx.SpinCtrl(self, value="1", min=1, max=1000)
+            self.control = wx.SpinCtrl(
+                self,
+                value="1",
+                min=1,
+                max=1000,
+                size=self.FromDIP(wx.Size(100, 28)),
+            )
 
             self.get_button = wx.Button(self, label="Get All")
             self.get_button.Bind(wx.EVT_BUTTON, self.get_all_)
-
             self.search_button = wx.Button(self, label="Within Selection")
             self.search_button.Bind(wx.EVT_BUTTON, self.search_button_)
 
-            self.gsel = wx.Button(self, label="Set Boxs")
+            self.gsel = wx.Button(self, label="Set Boxes")
             self.gsel.Bind(wx.EVT_BUTTON, self._gsel)
-            self.copy_boxs = wx.Button(self, label="Copy Boxs")
+            self.copy_boxs = wx.Button(self, label="Copy Boxes")
             self.copy_boxs.Bind(wx.EVT_BUTTON, self._copy_boxs)
-            self.paste_boxs = wx.Button(self, label="Paste Boxs")
+            self.paste_boxs = wx.Button(self, label="Paste Boxes")
             self.paste_boxs.Bind(wx.EVT_BUTTON, self._paste_boxs)
-            self.locationlist = wx.ListBox(self, size=(260, 480))
+
+            self.locationlist = wx.ListBox(
+                self,
+                size=self.FromDIP(wx.Size(250, 330)),
+            )
             self.locationlist.Bind(wx.EVT_LISTBOX, self.go_to_and_sel)
             self.locationlist.SetBackgroundColour((0, 0, 0))
             self.locationlist.SetForegroundColour((0, 255, 0))
-            self.lb_info_move = wx.StaticText(self, label="Move All Box/s\n Step == Faster")
-            self.lb_info_delete = wx.StaticText(self, label="Delete Spawns\n From Selected")
-            self.lb_info = wx.StaticText(self, label="Set Bounding Boxes:\n")
 
-            self.drop = wx.Choice(self, choices=[x for x in self.type_dic.values()], size=(150, 30))
+            self.lb_info_move = wx.StaticText(
+                self,
+                label="Move all boxes\nLarger step = faster movement",
+            )
+            self.lb_info_delete = wx.StaticText(
+                self,
+                label="Delete spawns from selected chunks",
+            )
+            self.lb_info = wx.StaticText(self, label="Set Bounding Boxes:")
+
+            self.drop = wx.Choice(
+                self,
+                choices=[x for x in self.type_dic.values()],
+                size=self.FromDIP(wx.Size(170, 28)),
+            )
             if "overworld" in self.canvas.dimension:
                 self.drop.Clear()
                 self.drop.Append([x for x in self.type_dic.values()][1:4])
-
-            elif 'nether' in self.canvas.dimension:
+            elif "nether" in self.canvas.dimension:
                 self.drop.Clear()
                 self.drop.Append([x for x in self.type_dic.values()][0])
             else:
                 self.drop.Clear()
                 self.drop.Append("None")
-
             self.drop.SetSelection(0)
 
             self.delete_spawns = wx.Button(self, label="Delete Spawns")
             self.delete_spawns.Bind(wx.EVT_BUTTON, self._delete_spawns)
 
-            self.sizer.Add(self.locationlist)
-            self.side.Add(self.get_button, 0, wx.TOP, 5)
-            self.side.Add(self.search_button, 0, wx.TOP, 5)
+            self.sizer.Add(
+                self.locationlist,
+                1,
+                wx.EXPAND | wx.ALL,
+                pad,
+            )
 
-            self.side.Add(self.copy_boxs, 0, wx.TOP, 5)
-            self.side.Add(self.paste_boxs, 0, wx.TOP, 5)
+            self.side.Add(self.get_button, 0, wx.EXPAND | wx.BOTTOM, pad)
+            self.side.Add(self.search_button, 0, wx.EXPAND | wx.BOTTOM, pad)
+            self.side.Add(self.copy_boxs, 0, wx.EXPAND | wx.BOTTOM, pad)
+            self.side.Add(self.paste_boxs, 0, wx.EXPAND | wx.BOTTOM, pad)
+            self.side.Add(self.lb_info_move, 0, wx.BOTTOM, pad)
 
-            self.grid = wx.GridSizer(4, 2, 0, -6)
-            self.grid.Add(self.lbct)
-            self.grid.Add(self.control, 0, wx.LEFT, -10)
-            self.grid.Add(self._up)
-            self.grid.Add(self._down)
-            self.grid.Add(self._north)
-            self.grid.Add(self._south)
-            self.grid.Add(self._west)
-            self.grid.Add(self._east)
+            step_row = wx.BoxSizer(wx.HORIZONTAL)
+            step_row.Add(self.lbct, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, pad)
+            step_row.Add(self.control, 1)
+            self.side.Add(step_row, 0, wx.EXPAND | wx.BOTTOM, pad)
+
+            self.grid = wx.GridSizer(rows=2, cols=3, vgap=pad, hgap=pad)
+            for button in (
+                self._up,
+                self._down,
+                self._north,
+                self._south,
+                self._west,
+                self._east,
+            ):
+                self.grid.Add(button, 0, wx.EXPAND)
+            self.side.Add(self.grid, 0, wx.EXPAND | wx.BOTTOM, pad)
+
+            self.side.Add(self.lb_info, 0, wx.BOTTOM, pad)
+            self.side.Add(self.drop, 0, wx.EXPAND | wx.BOTTOM, pad)
+            self.side.Add(self.gsel, 0, wx.EXPAND | wx.BOTTOM, pad)
+            self.side.Add(self.lb_info_delete, 0, wx.BOTTOM, pad)
+            self.side.Add(self.delete_spawns, 0, wx.EXPAND)
+
+            self.sizer.Add(self.side, 0, wx.EXPAND | wx.TOP | wx.RIGHT | wx.BOTTOM, pad)
 
             self._is_enabled = True
             self._moving = True
             self.Bind(wx.EVT_MOUSE_EVENTS, self._on_canvas_change)
             self.dim_c = ""
 
-            self.side.Add(self.lb_info_move, 0, wx.TOP, 5)
-            self.side.Add(self.grid, 0, wx.TOP, 5)
-            self.side.Add(self.lb_info, 0, wx.TOP, 5)
-            self.side.Add(self.drop, 0, wx.TOP, 5)
-            self.side.Add(self.gsel, 0, wx.TOP, 5)
-            self.side.Add(self.lb_info_delete, 0, wx.TOP, 5)
-            self.side.Add(self.delete_spawns, 0, wx.TOP, 5)
-            self.sizer.Add(self.side)
+            self.sizer.Fit(self)
             self.Layout()
-            self.Thaw()
+
+        self.Thaw()
 
     def _on_input_press(self, evt: InputPressEvent):
 
@@ -16433,8 +19474,6 @@ class HardCodedSpawns(wx.Frame):
                         g = int(gc / 6)
                         self.cord_dic[f"{self.type_dic[v[-1]]} Nether:{xc, zc}"].append(
                             int.from_bytes(v[c + g:g + c + 4], 'little', signed=True))
-                        # if gc%6 == 5 and g > 0: # located the ... I guess spacer bytes
-                        #     print(xc,zc, int.from_bytes(v[c+g+4:g+4+c+1], 'little', signed=True),''.join('{:02x}'.format(x) for x in v) )
                 else:
                     for gc, c in enumerate(range(4, 1 + (num_of * 6) * 4, 4)):
                         g = int(gc / 6)
@@ -16525,7 +19564,7 @@ class BufferWorldTool(wx.Frame):
                                               style=(wx.MINIMIZE_BOX | wx.MAXIMIZE_BOX | wx.RESIZE_BORDER |
                                                      wx.SYSTEM_MENU | wx.CAPTION | wx.CLOSE_BOX | wx.CLIP_CHILDREN |
                                                      wx.FRAME_FLOAT_ON_PARENT),
-                                              title="Selection, Organizer")
+                                              title="Buffer World Tool")
 
         self.parent = parent
 
@@ -16533,7 +19572,6 @@ class BufferWorldTool(wx.Frame):
         self.world = world
         self.font = wx.Font(13, wx.FONTFAMILY_ROMAN, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL)
         self.SetFont(self.font)
-        self.SetMinSize((320, 600))
         self.SetForegroundColour((0, 255, 0))
         self.SetBackgroundColour((0, 0, 0))
         self.Centre(direction=wx.VERTICAL)
@@ -16544,19 +19582,31 @@ class BufferWorldTool(wx.Frame):
         self.font = wx.Font(11, wx.FONTFAMILY_ROMAN, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL)
         top_sizer = wx.BoxSizer(wx.VERTICAL)
         self._sizer.Add(top_sizer)
-        self.label_main = wx.StaticText(self, label="Setup a blank world to work with\n"
-                                                    "You Then would open that World with amulet\n"
-                                                    " to pull in chunks from this One")
-        self.label = wx.StaticText(self, label="Set The Range of chunks from Source Its Times 4: ")
+        self.label_main = wx.StaticText(
+            self,
+            label=(
+                "Set up a blank buffer world, open that world in Amulet, then pull chunks "
+                "from the selected source world."
+            ),
+        )
+        self.label_main.Wrap(self.FromDIP(430))
+        self.label = wx.StaticText(self, label="Chunk range from source (multiplied by 4):")
+        self.source_info = wx.StaticText(
+            self,
+            label=(
+                "Source World stores the selected source path in main_dir.txt. "
+                "No world data is copied until you choose a pull action."
+            ),
+        )
+        self.source_info.Wrap(self.FromDIP(430))
 
         self.make_world_buffer = wx.Button(self, label="Build Buffer World")
         self.make_world_buffer.Bind(wx.EVT_BUTTON, self.make_world)
-        self.world_load = wx.Button(self, label="Change/Add Source World Location\n"
-                                                "(Make open world a buffer or changes the source world)\n"
-                                                "Note: Simply adds a main_dir.txt with the source location.")
+        self.world_load = wx.Button(self, label="Change / Add Source World")
         self.world_load.Bind(wx.EVT_BUTTON, self.operation_run)
-        self.keep_chunks = wx.CheckBox(self, label="Keep Previously Sourced Chunks\n"
-                                                   "( uncheck to overwrite local from source )")
+        self.keep_chunks = wx.CheckBox(
+            self, label="Keep previously sourced chunks (uncheck to overwrite local chunks from source)"
+        )
         self.keep_chunks.SetValue(True)
         self.the_range = wx.SpinCtrl(self, min=1, max=25)
         self.the_range.SetValue(6)
@@ -16575,35 +19625,47 @@ class BufferWorldTool(wx.Frame):
         self.save_new_data = wx.Button(self, label="Send Chunks Back")
         self.save_new_data.Bind(wx.EVT_BUTTON, self.put_data_back)
 
-        self.del_chk = wx.Button(self, label="Delete Selected Chunks \n( Both Locations )")
+        self.del_chk = wx.Button(self, label="Delete Selected Chunks (Both Locations)")
         self.del_chk.Bind(wx.EVT_BUTTON, self.del_selected_chunks)
 
-        self._sizer.Add(self.label_main)
-        self._sizer.Add(self.make_world_buffer)
-        self._sizer.Add(self.world_load, 0, wx.TOP, 10)
+        padding = self.FromDIP(6)
+        source_row = wx.BoxSizer(wx.HORIZONTAL)
+        source_row.Add(self.make_world_buffer, 0, wx.RIGHT, padding)
+        source_row.Add(self.world_load, 0)
 
-        self._sizer.Add(self.label, 0, wx.TOP, 15)
-        self._sizer.Add(self.the_range, 0, wx.TOP, 5)
-        self._sizer.Add(self.keep_chunks, 0, wx.TOP, 5)
-        self._sizer.Add(self.source_new_data, 0, wx.TOP, 5)
-        self._sizer.Add(self.save_new_data, 0, wx.TOP, 5)
+        range_row = wx.BoxSizer(wx.HORIZONTAL)
+        range_row.Add(self.label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, padding)
+        range_row.Add(self.the_range, 0, wx.ALIGN_CENTER_VERTICAL)
+
+        transfer_grid = wx.FlexGridSizer(0, 2, padding, padding)
+        transfer_grid.AddGrowableCol(0, 1)
+        transfer_grid.AddGrowableCol(1, 1)
+        transfer_grid.Add(self.source_new_data, 1, wx.EXPAND)
+        transfer_grid.Add(self.save_new_data, 1, wx.EXPAND)
 
         if self.world.level_wrapper.platform == 'bedrock':
-            self._sizer.Add(self.source_enty, 0, wx.TOP, 15)
-            self._sizer.Add(self.send_enty, 0, wx.TOP, 5)
+            transfer_grid.Add(self.source_enty, 1, wx.EXPAND)
+            transfer_grid.Add(self.send_enty, 1, wx.EXPAND)
         else:
             if self.world.level_wrapper.version >= 2730:
-                self._sizer.Add(self.source_enty, 0, wx.TOP, 15)
-                self._sizer.Add(self.send_enty, 0, wx.TOP, 5)
-
+                transfer_grid.Add(self.source_enty, 1, wx.EXPAND)
+                transfer_grid.Add(self.send_enty, 1, wx.EXPAND)
             else:
                 self.source_enty.Hide()
                 self.send_enty.Hide()
 
-        self._sizer.Add(self.source_players, 0, wx.TOP, 5)
-        self._sizer.Add(self.set_players, 0, wx.TOP, 5)
-        self._sizer.Add(self.del_chk, 0, wx.TOP, 5)
+        transfer_grid.Add(self.source_players, 1, wx.EXPAND)
+        transfer_grid.Add(self.set_players, 1, wx.EXPAND)
 
+        self._sizer.Add(self.label_main, 0, wx.ALL, padding)
+        self._sizer.Add(source_row, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, padding)
+        self._sizer.Add(self.source_info, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, padding)
+        self._sizer.Add(range_row, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, padding)
+        self._sizer.Add(self.keep_chunks, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, padding)
+        self._sizer.Add(transfer_grid, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, padding)
+        self._sizer.Add(self.del_chk, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, padding)
+
+        self._sizer.Fit(self)
         self.Layout()
         self.Thaw()
 
@@ -16692,8 +19754,6 @@ class BufferWorldTool(wx.Frame):
             os.mkdir(world_buffer_f + "/region")
             os.mkdir(world_buffer_f + "/DIM-1")
             os.mkdir(world_buffer_f + "/DIM1")
-            # if self.world.level_wrapper.version >= 2730:
-            #     os.mkdir(world_buffer_f + "/entities")
 
             shutil.copy(pathname + "/level.dat", world_buffer_f + "/level.dat")
 
@@ -16703,7 +19763,6 @@ class BufferWorldTool(wx.Frame):
                 pass
             with open(world_buffer_f + '/main_dir.txt', "w") as data:
                 data.write(pathname)
-            # with open(f"{world_buffer_f}/level.dat", "bw+", ) as dat:
             data = load(f"{world_buffer_f}/level.dat", compressed=True, little_endian=False)
             data["Data"]["LevelName"] = StringTag("buffer" + str(the_dir[-1]))
             save = data.save_to(compressed=True, little_endian=False)
@@ -16781,7 +19840,6 @@ class BufferWorldTool(wx.Frame):
             if exists(self.world.level_wrapper.path + '/main_dir.txt'):
                 with open(self.world.level_wrapper.path + '/main_dir.txt', "r") as d:
                     self.world_location = d.read()
-                # buffer_world = os.path.join(self.world_location, 'PlayersData' )
                 buffer_world = ''.join(self.world_location + "/PlayersData")
                 os.system(f"cp -rf \"{buffer_world}\" \"{self.world.level_wrapper.path}\"")
 
@@ -16897,7 +19955,6 @@ class BufferWorldTool(wx.Frame):
             else:  # java
                 buffer_world = ''.join(self.world.level_wrapper.path + "/" + self.get_dim_path_name())
                 os.system(f"cp -rf \"{buffer_world}\" \"{self.world_location}\"")
-                # shutil.copytree(buffer_world, source_world)
                 self.Onmsgbox("Chunks Saved to Source", f"Copied {buffer_world} to {source_world}")
 
     def source_new(self):
@@ -17015,7 +20072,7 @@ class BufferWorldTool(wx.Frame):
                     for k, v in digps_b:
                         to_remove.append(k)
                     for dk in to_remove:
-                        self.raw_level.delete(dk)  # TODO Find a better way to accomplish this
+                        self.raw_level.delete(dk)  # Clear destination actor keys before copying source records.
 
                     actorprefixs = iter(self.level_db.iterate(start=b'actorprefix',
                                                               end=b'actorprefix\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF'))
@@ -17084,7 +20141,7 @@ class PositionSelection(wx.Frame):
                                                 style=(wx.MINIMIZE_BOX | wx.MAXIMIZE_BOX | wx.RESIZE_BORDER |
                                                        wx.SYSTEM_MENU | wx.CAPTION | wx.CLOSE_BOX | wx.CLIP_CHILDREN |
                                                        wx.FRAME_FLOAT_ON_PARENT),
-                                                title="Selection, Organizer")
+                                                title="Selection Position Tool")
 
         self.parent = parent
 
@@ -17111,7 +20168,7 @@ class PositionSelection(wx.Frame):
         self.Show(True)
 
     def _create_buttons(self):
-        button_size = (60, 60)
+        button_size = self.FromDIP(wx.Size(60, 60))
 
         self._up = self._create_button("U", button_size, self._boxUp('m'))
         self._down = self._create_button("D", button_size, self._boxDown('m'))
@@ -17138,13 +20195,13 @@ class PositionSelection(wx.Frame):
 
     def _create_main_buttons(self):
 
-        diag_button_size = (120, 30)
+        diag_button_size = self.FromDIP(wx.Size(120, 34))
         self._southeast = self._create_button("South East", diag_button_size, self._boxDiag('se'))
         self._northeast = self._create_button("North East", diag_button_size, self._boxDiag('ne'))
         self._northwest = self._create_button("North West", diag_button_size, self._boxDiag('nw'))
         self._southwest = self._create_button("South West", diag_button_size, self._boxDiag('sw'))
 
-        diag_button_size_large = (120, 66)
+        diag_button_size_large = self.FromDIP(wx.Size(120, 70))
         self._dnorth = self._create_button("Down && North", diag_button_size, self._boxDiag('dan'))
         self._dsouth = self._create_button("Down && South", diag_button_size, self._boxDiag('das'))
         self._deast = self._create_button("Down && East", diag_button_size, self._boxDiag('dae'))
@@ -17177,8 +20234,8 @@ class PositionSelection(wx.Frame):
         return button
 
     def _arrange_buttons(self):
-        self.boxgrid = wx.GridSizer(3, 4, 2, 2)
-        self.boxgrid_b = wx.GridSizer(3, 2, 2, 2)
+        self.boxgrid = wx.GridSizer(3, 4, self.FromDIP(2), self.FromDIP(2))
+        self.boxgrid_b = wx.GridSizer(3, 2, self.FromDIP(2), self.FromDIP(2))
 
         self.boxgrid.Add(self._upp)
         self.boxgrid.Add(self._upm)
@@ -17199,55 +20256,55 @@ class PositionSelection(wx.Frame):
         self.boxgrid_b.Add(self._north)
         self.boxgrid_b.Add(self._south)
 
-        self.grid_and_text = wx.GridSizer(0, 2, 10, 5)
+        self.grid_and_text = wx.GridSizer(0, 2, self.FromDIP(10), self.FromDIP(5))
         self.label_grid_mover_l = wx.StaticText(self, label="Size ↑ ")
         self.label_grid_mover_l2 = wx.StaticText(self, label="        Move all ↑")
 
         self.grid_and_text.Add(self.label_grid_mover_l, 0, wx.LEFT, 0)
-        self.grid_and_text.Add(self.label_grid_mover_l2, 0, wx.LEFT, 25)
-        self.top_h.Add(self.boxgrid, 0, wx.LEFT, 2)
-        self.top_h.Add(self.boxgrid_b, 0, wx.LEFT, 50)
-        self.bot_h.Add(self.grid_and_text, 0, wx.LEFT, 80)
+        self.grid_and_text.Add(self.label_grid_mover_l2, 0, wx.LEFT, self.FromDIP(25))
+        self.top_h.Add(self.boxgrid, 0, wx.LEFT, self.FromDIP(2))
+        self.top_h.Add(self.boxgrid_b, 0, wx.LEFT, self.FromDIP(24))
+        self.bot_h.Add(self.grid_and_text, 0, wx.LEFT, self.FromDIP(40))
         self.pos_sizer.Add(self.top_h)
         self.pos_sizer.Add(self.bot_h)
 
     def _arrange_main_buttons(self):
-        self.boxgrid_b = wx.GridSizer(1, 2, 1, 5)
+        self.boxgrid_b = wx.GridSizer(1, 2, self.FromDIP(1), self.FromDIP(5))
 
         self.boxgrid_b.Add(self.lbct)
         self.boxgrid_b.Add(self.control)
 
-        self.boxgrid_dandd = wx.GridSizer(1, 4, 1, 5)
+        self.boxgrid_dandd = wx.GridSizer(1, 4, self.FromDIP(1), self.FromDIP(5))
         self.boxgrid_dandd.Add(self._dnorth)
         self.boxgrid_dandd.Add(self._dsouth)
         self.boxgrid_dandd.Add(self._deast)
         self.boxgrid_dandd.Add(self._dwest)
 
-        self.boxgrid_dandu = wx.GridSizer(1, 4, 1, 5)
+        self.boxgrid_dandu = wx.GridSizer(1, 4, self.FromDIP(1), self.FromDIP(5))
         self.boxgrid_dandu.Add(self._unorth)
         self.boxgrid_dandu.Add(self._usouth)
         self.boxgrid_dandu.Add(self._ueast)
         self.boxgrid_dandu.Add(self._uwest)
 
-        self.boxgrid_d = wx.GridSizer(1, 4, 1, 5)
+        self.boxgrid_d = wx.GridSizer(1, 4, self.FromDIP(1), self.FromDIP(5))
         self.boxgrid_d.Add(self._northeast)
         self.boxgrid_d.Add(self._southeast)
         self.boxgrid_d.Add(self._northwest)
         self.boxgrid_d.Add(self._southwest)
 
-        self.boxgrid_u = wx.GridSizer(1, 4, 2, 5)
+        self.boxgrid_u = wx.GridSizer(1, 4, self.FromDIP(2), self.FromDIP(5))
         self.boxgrid_u.Add(self._unortheast)
         self.boxgrid_u.Add(self._usoutheast)
         self.boxgrid_u.Add(self._unorthwest)
         self.boxgrid_u.Add(self._usouthwest)
 
-        self.boxgrid_down = wx.GridSizer(1, 4, 1, 5)
+        self.boxgrid_down = wx.GridSizer(1, 4, self.FromDIP(1), self.FromDIP(5))
         self.boxgrid_down.Add(self._dnortheast)
         self.boxgrid_down.Add(self._dsoutheast)
         self.boxgrid_down.Add(self._dnorthwest)
         self.boxgrid_down.Add(self._dsouthwest)
 
-        self.side_sizer.Add(self.boxgrid_b, 0, wx.LEFT, 70)
+        self.side_sizer.Add(self.boxgrid_b, 0, wx.LEFT, self.FromDIP(35))
         self.side_sizer.Add(self.lbstrech)
         self.side_sizer.Add(self.boxgrid_dandd, 0, wx.TOP | wx.LEFT, 0)
         self.side_sizer.Add(self.boxgrid_dandu, 0, wx.TOP | wx.LEFT, 0)
@@ -17379,7 +20436,7 @@ class SelectionOrganizer(wx.Frame):
                                                  style=(wx.MINIMIZE_BOX | wx.MAXIMIZE_BOX | wx.RESIZE_BORDER |
                                                         wx.SYSTEM_MENU | wx.CAPTION | wx.CLOSE_BOX | wx.CLIP_CHILDREN |
                                                         wx.FRAME_FLOAT_ON_PARENT),
-                                                 name="Blending Panel", title="Selection, Organizer")
+                                                 name="Selection Organizer", title="Selection Organizer")
         self.parent = parent
         self.canvas = canvas
         self.world = world
@@ -17399,13 +20456,11 @@ class SelectionOrganizer(wx.Frame):
     def _initialize_ui(self):
         self.Freeze()
         self._sizer.Clear(True)
-        self._sizer.Add(wx.BoxSizer(wx.VERTICAL), 1, wx.EXPAND, 0)
-        self._sizer.Add(wx.BoxSizer(wx.VERTICAL), 0, wx.EXPAND | wx.TOP, 5)
-        self._sizer.Add(wx.BoxSizer(wx.VERTICAL), 0, wx.EXPAND | wx.TOP, 290)
         self.Thaw()
 
     def _set_font_and_colors(self):
         self.font = wx.Font(13, wx.FONTFAMILY_ROMAN, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL)
+        self.SetFont(self.font)
         self.SetForegroundColour((0, 255, 0))
         self.SetBackgroundColour((0, 0, 0))
 
@@ -17414,12 +20469,36 @@ class SelectionOrganizer(wx.Frame):
         self._create_text_controls()
 
     def _create_buttons(self):
-        self.g_load = wx.Button(self, label="Load", size=(80, 50))
-        self.g_save = wx.Button(self, label="Save", size=(80, 50))
-        self._delete_unselected_chunks = wx.Button(self, label="DELETE \n Unselected \nChunks", size=(80, 50))
-        self._run_button = wx.Button(self, label="Set \n Selection Boxs", size=(80, 50))
-        self.gsel = wx.Button(self, label="Get \n Selection Boxs", size=(80, 50))
-        self.g_merge = wx.Button(self, label="Merge Dupes\nDels Text", size=(80, 50))
+        action_button_size = self.FromDIP(wx.Size(112, 46))
+        multiline_button_size = self.FromDIP(wx.Size(138, 52))
+        self.button_font = wx.Font(
+            11, wx.FONTFAMILY_ROMAN, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL
+        )
+
+        self.g_load = wx.Button(self, label="Load", size=action_button_size)
+        self.g_save = wx.Button(self, label="Save", size=action_button_size)
+        self._delete_unselected_chunks = wx.Button(
+            self, label="DELETE\nUnselected Chunks", size=multiline_button_size
+        )
+        self._run_button = wx.Button(
+            self, label="Set Selection\nBoxes", size=multiline_button_size
+        )
+        self.gsel = wx.Button(
+            self, label="Get Selection\nBoxes", size=multiline_button_size
+        )
+        self.g_merge = wx.Button(
+            self, label="Merge Dupes\nDelete Text", size=multiline_button_size
+        )
+
+        for button in (
+            self.g_load,
+            self.g_save,
+            self._delete_unselected_chunks,
+            self._run_button,
+            self.gsel,
+            self.g_merge,
+        ):
+            button.SetFont(self.button_font)
 
         self._delete_unselected_chunks.SetOwnForegroundColour((0, 0, 0))
         self._delete_unselected_chunks.SetOwnBackgroundColour((255, 0, 0))
@@ -17437,12 +20516,12 @@ class SelectionOrganizer(wx.Frame):
 
     def _create_text_controls(self):
         self._area_size_for_point = wx.TextCtrl(
-            self, style=wx.TE_PROCESS_ENTER, size=(100,26)
+            self, style=wx.TE_PROCESS_ENTER, size=self.FromDIP(wx.Size(100, 30))
         )
         self.lbl = wx.StaticText(self, label="For one point area size")
         self._area_size_for_point.SetValue("10,10,10")
         self._location_data = wx.TextCtrl(
-            self, style=wx.TE_MULTILINE | wx.TE_BESTWRAP, size=(200, 300)
+            self, style=wx.TE_MULTILINE | wx.TE_BESTWRAP, size=self.FromDIP(wx.Size(560, 240))
         )
         self.chk = wx.CheckBox(self, label="Enable:")
         self.lbl.SetFont(self.font)
@@ -17456,33 +20535,28 @@ class SelectionOrganizer(wx.Frame):
         self._location_data.SetBackgroundColour((0, 0, 0))
 
     def _setup_layout(self):
-        side_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        mid_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        top_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        padding = self.FromDIP(5)
 
-        # Set up the button grid
-        grid = wx.GridSizer(1, 5, 0, 0)
-        grid.Add(self._delete_unselected_chunks, 0, wx.LEFT, 1)
-        grid.Add(self.lbl, 0, wx.RIGHT, -80)
-        grid.Add(self.chk, 0, wx.TOP, 20)
-        grid.Add(self._area_size_for_point, 0, wx.LEFT, -10)
-        grid.Add(self.g_merge, 0, wx.LEFT, 0)
+        destructive_row = wx.BoxSizer(wx.HORIZONTAL)
+        destructive_row.Add(self._delete_unselected_chunks, 0, wx.ALL, padding)
+        destructive_row.AddStretchSpacer(1)
+        destructive_row.Add(self.g_merge, 0, wx.ALL, padding)
 
-        side_sizer.Add(grid, 0, wx.EXPAND | wx.TOP | wx.LEFT, 0)
+        point_row = wx.BoxSizer(wx.HORIZONTAL)
+        point_row.Add(self.lbl, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, padding)
+        point_row.Add(self.chk, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, padding)
+        point_row.Add(self._area_size_for_point, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, padding)
 
-        mid_sizer.Add(self.g_save)
-        mid_sizer.Add(self.g_load)
-        mid_sizer.Add(self._run_button, 0, wx.LEFT, 30)
-        mid_sizer.Add(self.gsel, 0, wx.LEFT, 20)
+        action_row = wx.BoxSizer(wx.HORIZONTAL)
+        action_row.Add(self.g_save, 0, wx.ALL, padding)
+        action_row.Add(self.g_load, 0, wx.ALL, padding)
+        action_row.Add(self._run_button, 0, wx.ALL, padding)
+        action_row.Add(self.gsel, 0, wx.ALL, padding)
 
-        # Add sizers to the main sizer
-        self._sizer.Add(side_sizer, 0, wx.EXPAND)
-        self._sizer.Add(mid_sizer, 0, wx.EXPAND | wx.TOP, 5)
-        self._sizer.Add(top_sizer, 1, wx.EXPAND | wx.TOP | wx.LEFT, 50)
-
-        self._sizer.Add(self._location_data, 1, wx.EXPAND | wx.ALL, 5)
-
-        self._location_data.Fit()
+        self._sizer.Add(destructive_row, 0, wx.EXPAND)
+        self._sizer.Add(point_row, 0, wx.EXPAND)
+        self._sizer.Add(action_row, 0, wx.EXPAND)
+        self._sizer.Add(self._location_data, 1, wx.EXPAND | wx.ALL, padding)
 
     def _gsel(self, _):
         for box in self.canvas.selection.selection_group.selection_boxes:
@@ -17563,11 +20637,7 @@ class SelectionOrganizer(wx.Frame):
             cleaner_data += f'{data.min[0]},{data.min[1]},{data.min[2]},{data.max[0]},{data.max[1]},{data.max[2]}\n'
         self._location_data.SetValue(cleaner_data[:-1])
 
-    def move_chunks(self, _):
-        pass
 
-    def find_chunks(self, _):
-        pass
 
     def delete_unselected(self, _):
         try:
@@ -17579,7 +20649,7 @@ class SelectionOrganizer(wx.Frame):
         self.merge(_)
         self._set_seletion()
         selected_chunks = self.canvas.selection.selection_group.chunk_locations()
-        self.frame = wx.Frame(self.parent.Parent, id=wx.ID_ANY, pos=wx.DefaultPosition, size=(400, 700),
+        self.frame = wx.Frame(self.parent.Parent, id=wx.ID_ANY, pos=wx.DefaultPosition, size=self.FromDIP(wx.Size(400, 700)),
                               style=(wx.MINIMIZE_BOX | wx.MAXIMIZE_BOX | wx.RESIZE_BORDER |
                                      wx.SYSTEM_MENU | wx.CAPTION | wx.CLOSE_BOX | wx.CLIP_CHILDREN |
                                      wx.FRAME_FLOAT_ON_PARENT),
@@ -17587,7 +20657,7 @@ class SelectionOrganizer(wx.Frame):
                               title="CHUNKS")
         sizer_P = wx.BoxSizer(wx.VERTICAL)
         self.frame.SetSizer(sizer_P)
-        self.textGrid = wx.TextCtrl(self.frame, style=wx.TE_MULTILINE | wx.TE_BESTWRAP, size=(400, 750))
+        self.textGrid = wx.TextCtrl(self.frame, style=wx.TE_MULTILINE | wx.TE_BESTWRAP, size=self.FromDIP(wx.Size(400, 750)))
         self.textGrid.SetValue("This is the list of Chunk That will be saved:\n" + str(selected_chunks))
         self.textGrid.SetFont(self.font)
         self.textGrid.SetForegroundColour((0, 255, 0))
@@ -17595,7 +20665,7 @@ class SelectionOrganizer(wx.Frame):
         sizer_P.Add(self.textGrid, 1, wx.EXPAND)
 
         self.frame.Show(True)
-        result = wx.MessageBox(" Delete All other Chunks? ", "Question", style=wx.YES_NO | wx.STAY_ON_TOP | wx.CENTRE,
+        result = wx.MessageBox(" Delete All other Chunks? ", "Question", style=wx.YES_NO | wx.CENTRE,
                                parent=self.frame, )
         if result == 2:
             all_chunks = self.world.all_chunk_coords(self.canvas.dimension)
@@ -17609,7 +20679,7 @@ class SelectionOrganizer(wx.Frame):
             self.canvas.renderer.render_world.unload()
             self.canvas.renderer.render_world.enable()
             result = wx.MessageBox(" All These Chunks Deleted,  Close Chunk Window info list",
-                                   "Information, Question", style=wx.YES_NO | wx.STAY_ON_TOP | wx.CENTRE,
+                                   "Information, Question", style=wx.YES_NO | wx.CENTRE,
                                    parent=self.Parent)
             if result == 2:
                 self.frame.Hide()
@@ -17672,8 +20742,10 @@ class BlendingWindow(wx.Frame):
         self.world = world
         self.canvas = canvas
 
-        # Setup font
-        self.font2 = wx.Font(16, wx.FONTFAMILY_ROMAN, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL)
+        # Use separate fonts so explanatory text stays readable without forcing an oversized window.
+        self.heading_font = wx.Font(14, wx.FONTFAMILY_ROMAN, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD)
+        self.body_font = wx.Font(11, wx.FONTFAMILY_ROMAN, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL)
+        self.control_font = wx.Font(12, wx.FONTFAMILY_ROMAN, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL)
 
         # Create UI elements
         self.create_ui()
@@ -17682,38 +20754,45 @@ class BlendingWindow(wx.Frame):
         self._run_button.Bind(wx.EVT_BUTTON, self._refresh_chunk)
         self.seed.Bind(wx.EVT_BUTTON, self.set_seed)
 
-        self.SetSize((460, 500))
         self.Fit()
+        self.SetMinSize(self.GetBestSize())
         self.Layout()
         self.Show(True)
 
     def create_ui(self):
-        self.info_label = wx.StaticText(self, label="There is No Undo Make a backup!", size=(440, 20))
-        self.info_label2 = wx.StaticText(self, label=self.get_info_text(), size=(440, 492))
+        self.info_label = wx.StaticText(self, label="There is no undo. Make a backup!")
+        self.info_label2 = wx.StaticText(self, label=self.get_info_text())
 
-        self.info_label.SetFont(self.font2)
+        self.info_label.SetFont(self.heading_font)
         self.info_label.SetForegroundColour((255, 0, 0))
         self.info_label.SetBackgroundColour((0, 0, 0))
 
-        self.info_label2.SetFont(self.font2)
+        self.info_label2.SetFont(self.body_font)
         self.info_label2.SetForegroundColour((0, 200, 0))
         self.info_label2.SetBackgroundColour((0, 0, 0))
+        self.info_label2.Wrap(self.FromDIP(470))
 
         self._all_chunks = wx.CheckBox(self, label="All Chunks")
-        self._all_chunks.SetFont(self.font2)
+        self._all_chunks.SetFont(self.control_font)
         self._all_chunks.SetValue(True)
 
-        self._recal_heightmap = wx.CheckBox(self,
-                                            label="Recalculate Heightmap \n(only needed in overworld for pasted chunks or structures)")
-        self._recal_heightmap.SetFont(self.font2)
+        self._recal_heightmap = wx.CheckBox(
+            self,
+            label="Recalculate Heightmap (Overworld pasted chunks / structures)",
+        )
+        self._recal_heightmap.SetToolTip(
+            "Only needed in the Overworld for pasted chunks or structures."
+        )
+        self._recal_heightmap.SetFont(self.control_font)
         self._recal_heightmap.SetValue(False)
 
         self._run_button = wx.Button(self, label="Force Blending")
-        self._run_button.SetFont(self.font2)
+        self._run_button.SetFont(self.control_font)
 
-        self.seed = wx.Button(self, label="(Save new seed)")
-        self.seed_input = wx.TextCtrl(self, style=wx.TE_LEFT, size=(220, 25))
-        self.seed_input.SetFont(self.font2)
+        self.seed = wx.Button(self, label="Save New Seed")
+        self.seed.SetFont(self.control_font)
+        self.seed_input = wx.TextCtrl(self, style=wx.TE_LEFT, size=self.FromDIP(wx.Size(220, 28)))
+        self.seed_input.SetFont(self.control_font)
         self.seed_input.SetValue(self.get_initial_seed_value())
 
         # Layout
@@ -17722,13 +20801,17 @@ class BlendingWindow(wx.Frame):
         side_sizer = wx.BoxSizer(wx.VERTICAL)
         self._sizer.Add(side_sizer)
 
-        side_sizer.Add(self.info_label, 0, wx.LEFT, 11)
-        side_sizer.Add(self.info_label2, 0, wx.LEFT, 11)
-        side_sizer.Add(self._run_button, 0, wx.LEFT, 11)
-        side_sizer.Add(self._all_chunks, 0, wx.LEFT, 11)
-        side_sizer.Add(self._recal_heightmap, 0, wx.LEFT, 11)
-        side_sizer.Add(self.seed_input, 0, wx.LEFT, 11)
-        side_sizer.Add(self.seed, 0, wx.LEFT, 11)
+        padding = self.FromDIP(7)
+        side_sizer.Add(self.info_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, padding)
+        side_sizer.Add(self.info_label2, 0, wx.LEFT | wx.RIGHT | wx.TOP | wx.BOTTOM, padding)
+        side_sizer.Add(self._run_button, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, padding)
+        side_sizer.Add(self._all_chunks, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, padding)
+        side_sizer.Add(self._recal_heightmap, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, padding)
+
+        seed_row = wx.BoxSizer(wx.HORIZONTAL)
+        seed_row.Add(self.seed_input, 0, wx.RIGHT | wx.ALIGN_CENTER_VERTICAL, padding)
+        seed_row.Add(self.seed, 0, wx.ALIGN_CENTER_VERTICAL)
+        side_sizer.Add(seed_row, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, padding)
 
     def get_info_text(self):
         return ("How It Works:\n"
@@ -18067,10 +21150,11 @@ class Tools(wx.Frame):
         self.SetSizer(self.sizer)
 
         # Grid sizer with 2 columns for layout
-        self._top_horz_sizer = wx.GridSizer(cols=2, hgap=5, vgap=5)
-        self.sizer.Add(self._top_horz_sizer, 1, wx.EXPAND | wx.ALL, 5)
+        self._grid_gap = self.FromDIP(5)
+        self._top_horz_sizer = wx.GridSizer(cols=2, hgap=self._grid_gap, vgap=self._grid_gap)
+        self.sizer.Add(self._top_horz_sizer, 1, wx.EXPAND | wx.ALL, self._grid_gap)
 
-        self.SetMinSize((80, 80))
+        self.SetMinSize(self.FromDIP(wx.Size(80, 80)))
 
         self.font = wx.Font(15, wx.FONTFAMILY_ROMAN, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL)
         self.SetFont(self.font)
@@ -18086,7 +21170,7 @@ class Tools(wx.Frame):
         self.Show(True)
 
     def create_buttons(self):
-        _size = (170, 50)
+        _size = self.FromDIP(wx.Size(170, 50))
         self._position = wx.Button(self, label='Selection \nPosition Tool', size=_size)
         self._force_blending = wx.Button(self, label='Force \nBlending Tool', size=_size)
         self._chunk_data = wx.Button(self, label='Chunk Tool', size=_size)
@@ -18210,9 +21294,9 @@ class Tools(wx.Frame):
                       font_size=14)
 
         CustomToolTip(self, self._remap_villager_workstations,
-                      text = "This will rebuild villager data, fixing the iron farm and restocking. \n"
-                             "It also adds a fast way to manage trades, including unlimited trades,\n"
-                             " lowering costs, adding all enchantments, etc.",font_size=14)
+                      text="Inspect village data, export or restore village sync records,\n"
+                           "and manage villager trades. Village rebuilding is on hold.",
+                      font_size=14)
 
         CustomToolTip(self, self._inventory_editor,
                       "Inventory Editor only supports the latest version.\n"
@@ -18281,7 +21365,7 @@ class Tools(wx.Frame):
         self._inventory_editor.SetBackgroundColour(color_back)
 
     def layout_ui(self):
-        _left_size = 5
+        _left_size = self.FromDIP(5)
         self._top_horz_sizer.Add(self._position, 0, wx.LEFT, _left_size)
         self._top_horz_sizer.Add(self._force_blending, 0, wx.LEFT, _left_size)
         self._top_horz_sizer.Add(self._chunk_data, 0, wx.LEFT, _left_size)
@@ -18451,81 +21535,59 @@ class MultiTools(wx.Panel, DefaultOperationUI):
         DefaultOperationUI.__init__(self, parent, canvas, world, options_path)
 
         self.version = 9
-        self.remote_version = self.get_top_of_remote_file(
-            r'https://raw.githubusercontent.com/PREMIEREHELL/Amulet-Plugins/main/Multi_Plugins.py')
+        self.Freeze()
+        self._is_enabled = True
+        self._moving = True
+        self._sizer = wx.BoxSizer(wx.VERTICAL)
+        self.SetSizer(self._sizer)
 
-        if self.remote_version > self.version and self.remote_version is not None:
+        self.font = wx.Font(24, wx.FONTFAMILY_ROMAN, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL)
+        self._window_button = wx.Button(
+            self,
+            label=f"Multi \n Tools \n V: {self.version} ",
+            size=self.FromDIP(wx.Size(128, 118)),
+        )
+        self._window_button.SetFont(self.font)
+        self._window_button.Bind(wx.EVT_BUTTON, self._window_tools)
 
-            self.download_latest_script()
+        self._original_repo_button = wx.Button(self, label="Original Maintainer Repository")
+        self._community_repo_button = wx.Button(self, label="ZeroTraceAPI Community Fork")
+        self._original_repo_button.SetToolTip(
+            "Opens the original maintainer repository in your default browser. "
+            "No automatic update check is performed."
+        )
+        self._community_repo_button.SetToolTip(
+            "Opens the ZeroTraceAPI community-maintained fork in your default browser. "
+            "No automatic update check is performed."
+        )
+        self._original_repo_button.Bind(wx.EVT_BUTTON, self._open_original_repository)
+        self._community_repo_button.Bind(wx.EVT_BUTTON, self._open_community_repository)
 
-            event = [x for x in parent.GetChildren() if isinstance(x, wx.BitmapButton)][1]
-            custom_event = wx.CommandEvent(wx.wxEVT_COMMAND_BUTTON_CLICKED, event.GetId())
-            custom_event.SetEventObject(event)
-            event.GetEventHandler().ProcessEvent(custom_event)
-        else:
-            self.is_file_recent()
-            self.Freeze()
-            self._is_enabled = True
-            self._moving = True
-            self._sizer = wx.BoxSizer(wx.VERTICAL)
-            self.SetSizer(self._sizer)
-            self.font = wx.Font(33, wx.FONTFAMILY_ROMAN, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL)
-            self._window_button = wx.Button(self, label=f"Multi \n Tools \n V: {self.version} ", size=(270, 240))
-            self._window_button.SetFont(self.font)
-            self._window_button.Bind(wx.EVT_BUTTON, self._window_tools)
-            self._sizer.Add(self._window_button)
-            self.Layout()
-            self.Thaw()
-            tools = Tools(self.parent, self.world, self.canvas)
-            tools.Show()
+        padding = self.FromDIP(5)
+        self._sizer.Add(
+            self._window_button,
+            0,
+            wx.ALL | wx.ALIGN_CENTER_HORIZONTAL,
+            padding,
+        )
+        self._sizer.Add(
+            self._original_repo_button,
+            0,
+            wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM,
+            padding,
+        )
+        self._sizer.Add(
+            self._community_repo_button,
+            0,
+            wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM,
+            padding,
+        )
 
+        self.Layout()
+        self.Thaw()
 
-    def download_latest_script(self):
-        try:
-            url = r'https://raw.githubusercontent.com/PREMIEREHELL/Amulet-Plugins/main/Multi_Plugins.py'
-            response = urllib.request.urlopen(url)
-            if response.status == 200:
-                with open(self.get_script_path(), 'w', encoding='utf-8') as file:
-                    file.write(response.read().decode('utf-8'))
-            else:
-                print('Could not get a response to auto apply, please visit the repo.')
-        except Exception as e:
-            print(f"Error downloading the latest script: {e}")
-    def download_latest_json(self):
-        try:
-            url = r'https://raw.githubusercontent.com/PREMIEREHELL/Amulet-Plugins/main/item_atlas.json'
-            response = urllib.request.urlopen(url)
-            if response.status == 200:
-                with open(self.get_script_path_for_json(), 'w', encoding='utf-8') as file:
-                    file.write(response.read().decode('utf-8'))
-            else:
-                print('Could not get a response to auto apply, please visit the repo.')
-        except Exception as e:
-            print(f"Error downloading the latest script: {e}")
-
-    def get_script_path(self):
-        return os.path.abspath(__file__)
-    def get_script_path_for_json(self):
-        return os.path.join(os.path.dirname(os.path.abspath(__file__)), 'item_atlas.json')
-
-    def get_top_of_remote_file(self, url, num_bytes=100):
-        try:
-            req = urllib.request.Request(url)
-            req.add_header('Range', f'bytes=0-{num_bytes - 1}')
-            response = urllib.request.urlopen(req)
-
-            if response.status == 206:  # HTTP 206 Partial Content
-                raw = response.read().decode('utf-8').split('#')
-                version = raw[1].split('v')
-                return int(version[0])
-            elif response.status == 200:
-                return response.read().decode('utf-8')
-            else:
-                print(f"Error: {response.status} could not check for update")
-                return None
-        except Exception as e:
-            print(f"Error fetching remote file: {e}")
-            return None
+        tools = Tools(self.parent, self.world, self.canvas)
+        tools.Show()
 
     def bind_events(self):
         super().bind_events()
@@ -18537,39 +21599,25 @@ class MultiTools(wx.Panel, DefaultOperationUI):
         self._selection.enable()
 
     def _window_tools(self, _):
-        if self.version == self.remote_version:
-            tools = Tools(self.parent, self.world, self.canvas)
-            tools.Show()
+        tools = Tools(self.parent, self.world, self.canvas)
+        tools.Show()
 
-    def is_file_recent(self,  age_limit=25):
-        file_path = self.get_script_path()
-        if os.path.exists(file_path):
-            current_time = time.time()
-            file_mod_time = os.path.getmtime(file_path)
-            file_age = current_time - file_mod_time
-            if file_age < age_limit:
-                self.download_latest_json()
-                wx.MessageBox(f"A new version has been apply was v 7 now version 8"
-                           f" {self.remote_version}\n"
-                              f"V: 3 and 4\n"
-                              f"The update has been automatically applyed:\n"
-                              f"Fixed issue with force blending on Bedrock,\n"
-                              f"Added message to select player for Set Player Data,\n"
-                              f"Added New button to Reset Vaults in Java and Bedrock.\n"
-                              f"v:5 Fixed Java Force Blending Tool\n"
-                              f"v:6 Added missing imports for NBT Editor For Inventory\n"
-                              f"v:7 dded Feature Villager Tool For bedrock , fixed iron farns, \n"
-                              f"v:7 Added Simple Inventory Editor For Bedrock  Tool, \n"
-                              f"auto repostion to workstation, edited trades \n "
-                              f"Added Feature to Chunktool to exclude the biome , may need more work\n "
-                              f"Added Feature to Selection organizer to work with only one point and set the range"
-                              f"Fixed Bedrock height maps for blending tool\n"
-                              f"Added enable disable hardcore button in Set player data for bedrock\n"
-                              f"________________List of recent changes___________________________\n"
-                              f"v:8 Added Drag and drop to Inventory Editor and some bug fixes\n"
-                              f"v:8 Added Banner tools ad updated fierwork editor\n"
-                              f"v:9 Added in new items for bedrock inventoy editor\n",
-                              "The Plugin has Been Updated", wx.OK | wx.ICON_INFORMATION)
+    def _open_original_repository(self, _):
+        if not wx.LaunchDefaultBrowser(ORIGINAL_REPOSITORY_URL):
+            wx.MessageBox(
+                "Could not open the original repository in the default browser.",
+                "Multi TOOLS",
+                wx.OK | wx.ICON_ERROR,
+            )
+
+    def _open_community_repository(self, _):
+        if not wx.LaunchDefaultBrowser(COMMUNITY_REPOSITORY_URL):
+            wx.MessageBox(
+                "Could not open the community fork in the default browser.",
+                "Multi TOOLS",
+                wx.OK | wx.ICON_ERROR,
+            )
 
 
-export = dict(name="Multi TOOLS", operation=MultiTools)  # By PremiereHell
+# Amulet reads this module-level export dynamically to register the operation.
+export = dict(name="Multi TOOLS", operation=MultiTools)  # Originally by PremiereHell; fork maintained by ZeroTraceAPI
