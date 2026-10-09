@@ -1,20 +1,20 @@
-# Amulet-Plugins
+# Amulet-Plugins (Community-Maintained Fork)
 
-Community-maintained fork of PREMIEREHELL/Amulet-Plugins.
+An independent community-maintained fork of [PREMIEREHELL/Amulet-Plugins](https://github.com/PREMIEREHELL/Amulet-Plugins), focused on keeping the plugins functional and available for current users through bug fixes, compatibility improvements, and ongoing maintenance.
 
-This fork currently focuses on stability and UI fixes for the inventory editor and related tools.
+Maintenance primarily focuses on **Multi Tools**. Other included utilities and older versions may receive less frequent updates.
 
-Original project credit and documentation are preserved below.
+This fork preserves credit to the original maintainer and contributors. It is not an official upstream project, but improvements remain available for possible upstream reuse if the original maintainer returns.
 
-Welcome to **Amulet-Plugins**, where I share tools and plugins for **Minecraft editing**.  
+## Usage and Feedback
 
-Currently available:
+**Back up your worlds before making changes**, especially when using experimental or destructive tools.
 
-- **Inventory Editor**: Quickly manage your in-game inventory—add, remove, or customize items with ease.  
-- **Village Editor**: Modify villager trades, inventories, and village data efficiently.  
+Bug reports and feature requests are welcome.
 
-More videos are coming soon to explain how to use the plugins.  
+Maintenance is provided on a best-effort basis.
 
-Click the thumbnail to watch a preview:
+## Original Project
 
-[![Watch the video](https://img.youtube.com/vi/6siUoN8_9zg/0.jpg)](https://youtu.be/6siUoN8_9zg)
+- [Original Repository](https://github.com/PREMIEREHELL/Amulet-Plugins)
+- [Original Demonstration Video](https://youtu.be/6siUoN8_9zg)

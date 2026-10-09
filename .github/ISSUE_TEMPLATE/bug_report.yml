@@ -1,71 +1,58 @@
 name: Bug Report (Guided)
-description: Create a report to help improve the plugin
-title: "[Bug]: "
+description: Report a problem using a structured form.
+title: "[BUG] "
 labels: ["bug"]
-
 body:
   - type: checkboxes
+    id: before-reporting
     attributes:
       label: Before reporting
       options:
-        - label: I searched existing issues to make sure this was not already reported.
+        - label: I checked existing issues for a similar report.
           required: true
-
-        - label: I tested this on the latest community-maintained branch if available.
+        - label: I tested the latest community-maintained version, if available.
           required: false
 
+  - type: input
+    id: affected-tool
+    attributes:
+      label: Affected tool or file
+      description: Which tool, window, or operation is involved? Optional if unknown.
+      placeholder: "Multi Tools / Inventory Editor"
+    validations:
+      required: false
+
   - type: textarea
+    id: issue
     attributes:
       label: Describe the issue
-      description: Clearly explain what happened.
-      placeholder: The inventory editor crashes when...
+      description: Explain what happened.
+      placeholder: "The inventory editor..."
     validations:
       required: true
 
   - type: textarea
+    id: steps
     attributes:
       label: Steps to reproduce
       placeholder: |
         1. Open Amulet
-        2. Open Inventory Editor
-        3. Click...
-        4. Crash occurs
+        2. Open the affected tool
+        3. Select...
+        4. Observe...
     validations:
       required: true
 
   - type: textarea
+    id: expected
     attributes:
       label: Expected behavior
       description: What should happen instead?
     validations:
       required: true
 
-  - type: dropdown
-    attributes:
-      label: Minecraft edition
-      options:
-        - Bedrock Edition
-        - Java Edition
-        - Both
-        - Unknown
-    validations:
-      required: true
-
   - type: input
-    attributes:
-      label: Minecraft version
-      placeholder: "1.21.82"
-    validations:
-      required: false
-
-  - type: input
-    attributes:
-      label: Amulet version
-      placeholder: "0.10.x"
-    validations:
-      required: false
-
-  - type: input
+    id: operating-system
     attributes:
       label: Operating system
       placeholder: "Windows 11"
@@ -73,19 +60,62 @@ body:
       required: true
 
   - type: input
+    id: amulet-version
+    attributes:
+      label: Amulet version
+      placeholder: "0.10.x"
+    validations:
+      required: false
+
+  - type: dropdown
+    id: minecraft-edition
+    attributes:
+      label: Minecraft edition
+      options:
+        - Java Edition
+        - Bedrock Edition
+        - Both
+        - Unknown / Not applicable
+    validations:
+      required: true
+
+  - type: input
+    id: minecraft-version
+    attributes:
+      label: Minecraft version
+      placeholder: "1.21.x"
+    validations:
+      required: false
+
+  - type: input
+    id: plugin-version
     attributes:
       label: Plugin branch / version
-      placeholder: "community-maintained-v1"
+      placeholder: "Community fork release or commit"
     validations:
       required: false
 
   - type: textarea
+    id: logs
     attributes:
       label: Console errors or logs
-      description: Paste any relevant errors here.
+      description: Optional. Remove private paths and other sensitive information.
       render: shell
+    validations:
+      required: false
 
   - type: textarea
+    id: screenshots
     attributes:
       label: Screenshots or videos
-      description: Optional
+      description: Optional. Attach images or links if useful; remove private details.
+    validations:
+      required: false
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Additional notes
+      description: Optional. Include any other details that may help explain or reproduce the issue.
+    validations:
+      required: false

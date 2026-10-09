@@ -1,36 +1,57 @@
 name: Feature Request (Guided)
-description: Suggest an improvement or new feature.
-title: "[Feature]: "
+description: Suggest an improvement or new feature using a structured form.
+title: "[FEATURE] "
 labels: ["enhancement"]
-
 body:
-  - type: textarea
+  - type: markdown
     attributes:
-      label: Feature Description
-      description: |
-        Clearly describe the feature, improvement, or idea.
+      value: Check existing issues for similar requests when possible. A technical implementation is not required.
+
+  - type: input
+    id: affected-tool
+    attributes:
+      label: Affected tool or component
+      description: Which tool or part of the plugin would this concern? Optional if unknown.
+      placeholder: "Multi Tools / Inventory Editor"
+    validations:
+      required: false
+
+  - type: textarea
+    id: feature
+    attributes:
+      label: Describe the feature
+      description: What would you like to see added or improved?
     validations:
       required: true
 
   - type: textarea
+    id: problem
     attributes:
-      label: Problem or Limitation
-      description: |
-        What problem would this solve?
-        What limitation currently exists?
-      placeholder: |
-        The current inventory editor cannot...
+      label: Problem or limitation
+      description: What issue, limitation, or inconvenience would this address?
+    validations:
+      required: false
 
   - type: textarea
+    id: proposal
     attributes:
-      label: Proposed Solution
-      description: |
-        Describe how you think this could work.
-      placeholder: |
-        Add a button that...
+      label: Proposed solution
+      description: Optional. Describe how you think it could work; no code is required.
+    validations:
+      required: false
 
   - type: textarea
+    id: alternatives
     attributes:
-      label: Additional Notes
-      description: |
-        Optional screenshots, mockups, references, or extra details.
+      label: Alternatives considered
+      description: Optional. Mention other approaches or existing workarounds.
+    validations:
+      required: false
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Additional notes
+      description: Optional. Add screenshots, mockups, references, compatibility details, or extra context.
+    validations:
+      required: false

@@ -1,42 +1,35 @@
 ---
 name: Feature Request (Simple)
-about: Suggest an improvement or new feature.
+about: Suggest an improvement or new feature using a flexible template.
 title: "[FEATURE] "
 labels: enhancement
 assignees: ''
-
 ---
 
 # Feature Request
+
+If possible, check for similar requests first. Describe your idea in your own words. Remove sections that do not apply.
+
+## Affected tool or component
+
+Which tool or part of the plugin would this concern? (Optional)
 
 ## Describe the feature
 
 What would you like to see added or improved?
 
----
-
 ## Problem or limitation
 
-What issue, limitation, or inconvenience does this solve?
-
----
+What issue, limitation, or inconvenience would this address? (Optional)
 
 ## Proposed solution
 
-Describe how you think this feature could work.
-
----
+How might this work? A technical implementation is not required. (Optional)
 
 ## Alternatives considered
 
-(Optional)
-
-Have you considered any alternative solutions or workarounds?
-
----
+Have you considered any other approaches or workarounds? (Optional)
 
 ## Additional notes
 
-(Optional)
-
-Add screenshots, mockups, references, or extra context here.
+Add screenshots, mockups, references, compatibility details, or extra context here. (Optional)

@@ -1,19 +1,22 @@
 ---
 name: Bug Report (Simple)
-about: Create a report to help improve the plugin
+about: Report a problem using a flexible template.
 title: "[BUG] "
 labels: bug
 assignees: ''
-
 ---
 
 # Bug Report
 
+If possible, check existing issues and test the latest community-maintained version. Provide the details you know. Remove sections that do not apply. Do not share private world data or unredacted personal information.
+
+## Affected tool or file
+
+Which tool, window, or operation is involved? (Optional)
+
 ## Describe the issue
 
 What happened?
-
----
 
 ## Steps to reproduce
 
@@ -22,36 +25,26 @@ What happened?
 3.
 4.
 
----
-
 ## Expected behavior
 
 What should happen instead?
 
----
-
 ## Environment
 
-* OS:
-* Amulet version:
-* Minecraft version:
-* Java or Bedrock edition:
-* Plugin branch / version:
-
----
+- Operating system:
+- Amulet version:
+- Minecraft edition (Java / Bedrock / Both / Unknown / Not applicable):
+- Minecraft version:
+- Plugin branch / version:
 
 ## Console errors or logs
 
-Paste any relevant errors here.
+Paste relevant errors here, if available.
 
----
-
-## Screenshots
+## Screenshots or videos
 
 (Optional)
 
----
-
 ## Additional notes
 
-Anything else that may help reproduce or explain the issue.
+Anything else that may help explain or reproduce the issue. (Optional)
