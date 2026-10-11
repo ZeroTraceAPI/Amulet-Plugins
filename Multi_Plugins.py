@@ -43,6 +43,7 @@ from amulet.api.block_entity import BlockEntity
 from amulet.api.errors import ChunkDoesNotExist
 from amulet_map_editor.api.wx.ui import simple
 from amulet_map_editor.api import image
+import functools
 from functools import reduce
 import operator
 from PIL import Image
@@ -2562,7 +2563,8 @@ enchantments = {
     37: "Swift Sneak",
     40: "Breach",
     39: "Density",
-    38: "Wind Burst"
+    38: "Wind Burst",
+    41: "Lunge"
 }
 valid_enchants = {
             "helmet": [0, 1, 3, 4, 5, 6, 8, 17, 26, 27, 28],
@@ -2571,6 +2573,7 @@ valid_enchants = {
             "leggings": [0, 1, 3, 4, 5, 37, 17, 26, 27, 28],
             "boots": [0, 1, 2, 3, 4, 5, 7, 25, 36, 17, 26, 27, 28],
             "sword": [9, 10, 11, 12, 13, 14, 16, 17, 26, 27, 28],
+            "spear": [9, 10, 11, 12, 13, 14, 17, 26, 28, 41],
             "axe": [9, 10, 11, 13, 14, 15, 16, 17, 18, 26, 27, 28],
             "pickaxe": [15, 16, 17, 18, 26, 27, 28],
             "shovel": [15, 16, 17, 18, 26, 27, 28],
@@ -2578,9 +2581,13 @@ valid_enchants = {
             "bow": [19, 20, 21, 22, 17, 26, 27, 28],
             "crossbow": [19, 33, 34, 35, 17, 26, 27, 28],
             "trident": [13, 16, 17, 26, 29, 30, 31, 32, 27, 28],
-            "fishing_rod": [16, 17, 23, 24, 26, 27, 28],
-            "shears": [16, 17, 26, 27, 28],
-            "mace": [17, 26, 38, 39, 40, 27, 28],
+            "fishing_rod": [17, 23, 24, 26, 28],
+            "shears": [15, 16, 17, 26, 28],
+            "brush": [17, 26, 28],
+            "flint_and_steel": [17, 26, 28],
+            "carrot_on_a_stick": [17, 26, 28],
+            "warped_fungus_on_a_stick": [17, 26, 28],
+            "mace": [10, 11, 13, 17, 26, 28, 38, 39, 40],
             'enchanted_book': list(enchantments.keys()),
             'shield' : [17,26, 27, 28]
         }
@@ -2647,8 +2654,8 @@ max_levels = {
     12: 2,   # Knockback
     14: 3,   # Looting
     31: 3,   # Loyalty
-    23: 1,   # Luck of the Sea
-    24: 1,   # Lure
+    23: 3,   # Luck of the Sea
+    24: 3,   # Lure
     26: 1,   # Mending
     33: 1,   # Multishot
     34: 1,   # Piercing
@@ -2666,9 +2673,10 @@ max_levels = {
     5: 3,    # Thorns
     17: 3,   # Unbreaking
     37: 3,   # Swift Sneak
-    40: 4,   # Breach (not known)
-    39: 5,   # Density (not known)
-    38: 3    # Wind Burst (not known)
+    40: 4,   # Breach
+    39: 5,   # Density
+    38: 3,   # Wind Burst
+    41: 3    # Lunge
 }
 trims_dict = {
     "Sentry": "sentry", "Vex": "vex", "Wild": "wild", "Coast": "coast",
@@ -2748,10 +2756,12 @@ DRAG_DATA_TARGET = collections.defaultdict(dict)
 def get_item_type(item_id):
     """Returns the type of item in the slot based on its ID or tag."""
     types = [
-        "sword", "pickaxe", "axe", "shovel", "hoe",
+        "sword", "spear", "pickaxe", "axe", "shovel", "hoe",
         "helmet", "chestplate", "leggings", "boots",
         "bow", "crossbow", "trident", "elytra",
-        "fishing_rod", "mace", "enchanted_book", "shield"
+        "fishing_rod", "mace", "enchanted_book", "shield",
+        "shears", "brush", "flint_and_steel",
+        "carrot_on_a_stick", "warped_fungus_on_a_stick"
     ]
     return next((t for t in types if t in item_id), "Not in list")
 
@@ -2970,7 +2980,7 @@ class IconResources:
 
                 source_dir = Path(__file__).resolve().parent
 
-                # Local/source-adjacent locations.
+                # Local paths adjacent to the plugin source.
                 for directory in (
                     source_dir,
                     source_dir / "data",
@@ -3162,7 +3172,7 @@ class IconResources:
             self.data.setdefault("banner", {})
 
             # The high-resolution atlas is optional. It is deliberately loaded
-            # only from normal local/bundled locations: a remembered explicit
+            # only from normal local / bundled locations: a remembered explicit
             # item_atlas.json pointer must never be treated as item_atlas_128.json.
             highres_path = get_resource_path("data/item_atlas_128.json")
             if highres_path is not None:
@@ -3184,8 +3194,8 @@ class IconResources:
                     )
 
             # Load the compatibility atlas first, then overlay only matching IDs
-            # from the optional 128 x 128 atlas. Metadata/order remains owned by
-            # item_atlas.json so category/range behavior cannot move silently.
+            # from the optional 128 x 128 atlas. Metadata / order remains owned by
+            # item_atlas.json so category / range behavior cannot move silently.
             self.load_icon_cache(self.data, self.highres_data)
 
             # Decoded wx.Images are cached separately, so the large base64
@@ -3342,7 +3352,7 @@ class IconResources:
         if legacy_image is None or not legacy_image.IsOk():
             return
 
-        # Preserve the legacy atlas as the compatibility/menu authority.
+        # Preserve the legacy atlas as the compatibility / menu authority.
         for item_id, data in self.data.items():
             if isinstance(data, dict) and "icon_position" in data:
                 try:
@@ -3533,7 +3543,7 @@ class IconResources:
         if window is None:
             return None
         try:
-            # Accessing a deleted wx wrapper raises RuntimeError/PyDeadObjectError.
+            # Accessing a deleted wx wrapper raises RuntimeError / PyDeadObjectError.
             window.GetId()
             window.GetHandle()
             return window
@@ -3822,7 +3832,7 @@ class InventoryEditor(wx.Frame):
     def _on_display_metrics_changed(self, event):
         # A full control rebuild is unnecessary for normal use because these
         # editors are reopened after changing Windows scaling. Refit immediately
-        # so resolution/display changes cannot leave a window off-screen.
+        # so resolution / display changes cannot leave a window off-screen.
         self._dpi_scale = _ui_dpi_scale(self)
         wx.CallAfter(self._fit_inventory_window)
         if event is not None:
@@ -4014,7 +4024,7 @@ class InventoryEditor(wx.Frame):
                     else:
                         save_size = (80, 80)
                     save_bmp = wx.ArtProvider.GetBitmap(wx.ART_FILE_SAVE, wx.ART_TOOLBAR, save_size)
-                    # Some Windows/wx builds return the stock toolbar art at a
+                    # Some Windows / wx builds return the stock toolbar art at a
                     # smaller native bitmap than the requested size. Scale the
                     # returned artwork explicitly so its visual size tracks the
                     # continuously interpolated slot size instead of looking
@@ -4266,8 +4276,8 @@ class IconListCtrl(wx.Frame):
         # relying on native bitmap-scale metadata.
         self._set_catalog_icon_spacing(
             # Five columns fit cleanly at all three calibrated displays.  The
-            # 1080p endpoint needs slightly narrower cells; 1440p/150% and
-            # 4K/225% already had good label room, so keep those nearly intact.
+            # 1080p endpoint needs slightly narrower cells; 1440p / 150% and
+            # 4K / 225% already had good label room, so keep those nearly intact.
             _ui_metric_three(self, 178, 205, 260),
             _ui_metric_three(self, 142, 150, 185),
         )
@@ -4434,7 +4444,7 @@ class IconListCtrl(wx.Frame):
         dragged_index = getattr(self, "dragged_index", None)
         dragged_id = getattr(self, "dragged_id", None)
 
-        # BeginDrag/EndDrag own mouse capture.  Only finalise a drag when one
+        # BeginDrag / EndDrag own mouse capture. Only finalise a drag when one
         # was actually created; a normal click or stray mouse-up is harmless.
         if drag_image is not None:
             try:
@@ -4993,7 +5003,6 @@ class BannerSelector(wx.Frame):
         return self.nbt_data.to_snbt(2)
 
     def on_save(self, event):
-        print(self.nbt_data, self.damage_color )
         _self = self._self
         key, slot = _self.Get_slot_map_key()
         keys = _self.editor.keys + [key,slot]
@@ -5009,7 +5018,6 @@ class BannerSelector(wx.Frame):
             current_nbt['Damage'] = self.damage_color
             current_nbt['tag']['Patterns'] = self.nbt_data['Patterns']
             current_nbt['tag']['Type'] = self.nbt_data['Type']
-        print(current_nbt)
 
     def on_clear_layers(self, event):
         self.layered_selection = []
@@ -6017,7 +6025,7 @@ class IconButton(wx.Panel):
             self, value=str(self.count), size=count_size, style=count_style
         )
         if self._compact_ui:
-            # Do not depend on Amulet/Windows issuing a hover or selection repaint
+            # Do not depend on Amulet / Windows issuing a hover or selection repaint
             # before these native controls obtain their dark colours.
             self.SetBackgroundColour(wx.Colour(0, 0, 0))
             self.button.SetBackgroundColour(wx.Colour(46, 46, 46))
@@ -6047,7 +6055,7 @@ class IconButton(wx.Panel):
         if timer is not None:
             timer.Stop()
         # Leave the scroll panel's permanent event bindings in place. Only
-        # clear ownership here; no Bind/Unbind while wx dispatches mouse-up.
+        # clear ownership here; no Bind / Unbind while wx dispatches mouse-up.
         self._drag_capture_window = None
         if getattr(self.editor, '_inventory_drag_source', None) is self:
             self.editor._inventory_drag_source = None
@@ -6102,7 +6110,7 @@ class IconButton(wx.Panel):
                 )
             button.Refresh()
         except (RuntimeError, AttributeError):
-            pass  # A popup action may already have replaced/destroyed this slot.
+            pass  # A popup action may already have replaced / destroyed this slot.
 
     def on_hover_leave(self, event):
         self.panel_leave = True
@@ -6312,7 +6320,7 @@ class IconButton(wx.Panel):
                     source_list[source_index]['Count'] = ByteTag(remaining)
 
         else:
-            # Default move/swap logic
+            # Default move / swap logic
             if self._tar_empty:
                 # Move: target was empty
 
@@ -6341,7 +6349,7 @@ class IconButton(wx.Panel):
 
 
         # The destination hover can complete before the source receives mouse-up.
-        # Release its native drag image/capture now or it can remain on-screen.
+        # Release its native drag image / capture now or it can remain on-screen.
         source_control = CLIP_BOARD.get('SOURCE_SELF')
         if source_control is not None:
             source_control._finish_drag_visual()
@@ -6382,7 +6390,7 @@ class IconButton(wx.Panel):
         event.Skip()
 
     def _on_drag_parent_left_up(self, event):
-        # Route releases to the original click/drag logic even across slots.
+        # Route releases to the original click / drag logic even across slots.
         if self.drag_image is not None:
             self.on_left_click(event)
         else:
@@ -6577,18 +6585,22 @@ class IconButton(wx.Panel):
                 )
 
             if any(t in item_name for t in [
-                                               "pickaxe", "axe", "shovel", "hoe", "trident",
+                                               "pickaxe", "axe", "shovel", "hoe", "trident", "spear",
                                                "helmet", "leggings", "chestplate", "boots",
                                                "chainmail", "sword", "elytra", "mace", "brush", 'shield', 'bow',
+                                               "fishing_rod", "shears", "flint_and_steel",
+                                               "carrot_on_a_stick", "warped_fungus_on_a_stick",
                                            ] + list(enchantments.values())):
                 enchant_item = wx.MenuItem(menu, wx.ID_ANY, "Edit Enchants")
                 menu.Append(enchant_item)
                 self.Bind(wx.EVT_MENU, lambda e, _self=self: self.tools.edit_enchants(_self), enchant_item)
 
             if any(t in item_name for t in [
-                "pickaxe", "axe", "shovel", "hoe", "trident",
+                "pickaxe", "axe", "shovel", "hoe", "trident", "spear",
                 "helmet", "leggings", "chestplate", "boots",
-                "chainmail", "sword", "elytra", "mace", "brush", "bow", 'shield'
+                "chainmail", "sword", "elytra", "mace", "brush", "bow", 'shield',
+                "fishing_rod", "shears", "flint_and_steel",
+                "carrot_on_a_stick", "warped_fungus_on_a_stick"
             ]):
                 unbreakable_text = 'Make Breakable' if last_data.get('tag', {}).get('Unbreakable',
                                                                                     False) else 'Make Unbreakable'
@@ -7019,7 +7031,7 @@ class IconButton(wx.Panel):
                     for category_name, id_ranges in group_data.items():
                         sub_menu = wx.Menu()
                         display_category = category_name.replace('_', ' ')
-                        # Avoid awkward repeated group/subgroup labels.
+                        # Avoid awkward repeated group / subgroup labels.
                         if display_category == group_name.replace('_', ' '):
                             display_category = 'Other'
                         # wx.Menu treats a single ampersand as a mnemonic marker.
@@ -9406,8 +9418,6 @@ class NBTEditor(wx.Panel):
 
         if opt == 'snbt':
             f_item = self.tree.GetFocusedItem()
-            #
-            #
 
             root_tree = self.tree.GetRootItem()
             loop_tree_nodes(root_tree, self.nbt_new)
@@ -9418,12 +9428,12 @@ class NBTEditor(wx.Panel):
                 tsnbt = []
                 for k, v in selected_nbt.items():
                     tsnbt.append(CompoundTag({k: v}).to_snbt(5))
-                snbt = '{' + ''.join([f" {x[1:-2]}," for x in tsnbt]) + "\n}"  # replace("}{", ",").replace("\n,", ",")
+                snbt = '{' + ''.join([f" {x[1:-2]}," for x in tsnbt]) + "\n}"
                 pat = re.compile(r'[A-Za-z0-9._+-:]+(?=":\s)')
                 matchs = pat.finditer(snbt)
                 for i, x in enumerate(matchs):
-                    C1 = x.span()[0] - 1 - (i)  # i*2 if no space
-                    C2 = x.span()[1] - 1 - (i)  # i*2 if no space
+                    C1 = x.span()[0] - 1 - (i)
+                    C2 = x.span()[1] - 1 - (i)
                     if ":" in x.group():
                         C1 -= 2
                         C2 += 2
@@ -9434,8 +9444,8 @@ class NBTEditor(wx.Panel):
                 pat = re.compile(r'[A-Za-z0-9._+-:]+(?=":\s)')
                 matchs = pat.finditer(snbt)
                 for i, x in enumerate(matchs):
-                    C1 = x.span()[0] - 1 - (i)  # i*2 if no space
-                    C2 = x.span()[1] - 1 - (i)  # i*2 if no space
+                    C1 = x.span()[0] - 1 - (i)
+                    C2 = x.span()[1] - 1 - (i)
                     if ":" in x.group():
                         C1 -= 2
                         C2 += 2
@@ -9827,8 +9837,6 @@ class NBTEditor(wx.Panel):
             return
         # Prevent the user from dropping an item inside of itself
         if self.tree.ItemIsChildOf(target, source):
-            print
-            "the tree item can not be moved in to itself! "
             self.tree.Unselect()
             return
 
@@ -9840,7 +9848,7 @@ class NBTEditor(wx.Panel):
         # One of the following methods of inserting will be called...
         def MoveHere(event):
 
-            # Save + delete the source
+            # Capture the source nodes before moving them.
             save = self.tree.SaveItemsToList(source)
 
             self.tree.Delete(source)
@@ -9851,7 +9859,7 @@ class NBTEditor(wx.Panel):
 
         def CopyHere(event):
 
-            # Save + delete the source
+            # Copy source nodes without deleting them.
             save = self.tree.SaveItemsToList(source)
             newitems = self.tree.InsertItemsFromList(save, target)
             self.tree.UnselectAll()
@@ -9859,7 +9867,7 @@ class NBTEditor(wx.Panel):
                 self.tree.SelectItem(item)
 
         def InsertInToThisGroup(event):
-            # Save + delete the source
+            # Capture source nodes before moving them into this group.
             save = self.tree.SaveItemsToList(source)
             self.tree.Delete(source)
             newitems = self.tree.InsertItemsFromList(save, target)
@@ -9886,8 +9894,6 @@ class NBTEditor(wx.Panel):
 
 
     def OnLeftDown(self, event):
-        print
-        "control key is", event.controlDown
 
         pt = event.GetPosition();
         item, flags = self.tree.HitTest(pt)
@@ -9895,8 +9901,6 @@ class NBTEditor(wx.Panel):
         event.Skip()
 
     def OnRightDown(self, event):
-        print
-        "control key is", event.controlDown
 
         pt = event.GetPosition();
         item, flags = self.tree.HitTest(pt)
@@ -9907,10 +9911,7 @@ class NBTEditor(wx.Panel):
         pt = event.GetPosition();
         item, flags = self.tree.HitTest(pt)
 
-        # expand/collapse toggle
         self.tree.Toggle(item)
-        print
-        "toggled ", item
 
     def OnSize(self, event):
         w, h = self.GetClientSize()
@@ -10336,27 +10337,51 @@ class Inventory(wx.Frame):
 
 
     def remove_player(self, _):
-        if self.world.level_wrapper.platform == "bedrock":
-            theKey = self._structlist.GetStringSelection().encode("utf-8")
-            wxx = wx.MessageBox("You are going to deleted \n " + str(theKey),
-                                "This can't be undone Are you Sure?", wx.OK | wx.CANCEL | wx.ICON_INFORMATION)
-            if wxx == int(16):
-                return
-            self.level_db.delete(theKey)
-            wxx = wx.MessageBox("THis " + str(theKey) + "has been deleted \n  Reload plugin to see changes \n"
-                                                        "Reloading in minecraft will regenerate the player",
-                                "PLAYER " + str(theKey) + " DELETED", wx.OK | wx.ICON_INFORMATION)
+        # Require an explicit OK result before modifying player data. A closed
+        # dialog or Cancel response must not initiate a write / delete.
+        selected_player = self._structlist.GetStringSelection()
+        if not selected_player:
+            wx.MessageBox("Select a player before removing one.",
+                          "No Player Selected", wx.OK | wx.ICON_INFORMATION, self)
+            return
+
+        platform = self.world.level_wrapper.platform
+        if platform != "bedrock" and selected_player == '~local_player':
+            # Java local-player data lives in level.dat, not a removable
+            # player-data file. Keep the existing prohibition explicit.
+            wx.MessageBox("The local player cannot be removed with this tool.",
+                          "Remove Player Unavailable", wx.OK | wx.ICON_INFORMATION, self)
+            return
+
+        if wx.MessageBox(
+                f"Remove player {selected_player!r}?\nThis cannot be undone.",
+                "Confirm Remove Player",
+                wx.OK | wx.CANCEL | wx.CANCEL_DEFAULT | wx.ICON_WARNING,
+                self) != wx.ID_OK:
+            return
+
+        if platform == "bedrock":
+            self.level_db.delete(selected_player.encode("utf-8"))
         else:
-            s_player = self._structlist.GetStringSelection()
-            if s_player == '~local_player':
-                print("You dont want to delete this")
-                pass  # path_to = self.world.level_wrapper.path + "/" + "level.dat"
-            else:
-                path_to = self.world.level_wrapper.path + "/PlayersData/" + s_player + ".dat"
+            path_to = self.world.level_wrapper.path + "/PlayersData/" + selected_player + ".dat"
             os.remove(path_to)
-        self._structlist.Clear()
-        self._structlist.Append(self._run_get_slist())
-        self._structlist.SetSelection(0)
+
+        if platform == "bedrock":
+            self._structlist.SetItems(self._run_get_slist())
+            if self._structlist.GetCount():
+                self._structlist.SetSelection(0)
+        else:
+            remaining = [p for p in self.world.players.all_player_ids()
+                         if p != selected_player]
+            remaining.reverse()
+            self._structlist.SetItems(remaining)
+            if remaining:
+                self._structlist.SetSelection(0)
+        wx.MessageBox(
+            f"Player {selected_player!r} was removed.\n"
+            "Reopen Inventory Editor to refresh the displayed data. "
+            "Minecraft may regenerate player data when the player rejoins.",
+            "Player Removed", wx.OK | wx.ICON_INFORMATION, self)
 
     def _run_get_slist(self):
         l = []
@@ -10765,7 +10790,7 @@ class ShapePainter(wx.Frame):
         self.int_x = wx.SpinCtrl(self, initial=4, size=spin_size)
         self.int_z = wx.SpinCtrl(self, initial=4, size=spin_size)
 
-        # Two balanced rows keep the Size/Y/X/Z fields inside the window.
+        # Two balanced rows keep the Size / Y / X / Z fields inside the window.
         for label, spinner in ((self.l_int_size, self.int_size),
                                (self.l_int_y, self.int_y),
                                (self.l_int_x, self.int_x),
@@ -11866,7 +11891,7 @@ class BedRock(wx.Panel):
         elif 'minecraft:the_nether' in self.canvas.dimension:
             dim = int(1).to_bytes(4, 'little', signed=True)
         elif 'minecraft:overworld' in self.canvas.dimension:
-            dim = b''  # int(0).to_bytes(4, 'little', signed=True)
+            dim = b''
         return dim
 
     def get_entities_nbt(self, rpos):
@@ -12985,8 +13010,8 @@ class Java(wx.Panel):
                     else:
                         mc_id = new_data.get('id')
                         print(f'NO CHUNK DATA file r.{rx}, {rz} Chunk: {cx} , {cz} , pos: {(x, y, z)} , id: {mc_id}')
-                        #  less than java version 2730
-                        # can not store entities without leaving a chunk hole.
+                        # Older Java data versions need an existing chunk to hold entities.
+                        # Avoid creating an invalid standalone entity record.
 
             self.canvas.run_operation(lambda: self._refresh_chunk_now(self.canvas.dimension, self.world, cx, cz))
             self.world.save()
@@ -13363,8 +13388,8 @@ class Java(wx.Panel):
                         else:
                             print(
                                 f'4 NO CHUNK DATA file r.{rx}, {rz} Chunk: {cx} , {cz} ')
-                            # java less than version 2730
-                        # can not store entities without leaving hole
+                            # Older Java data versions need an existing chunk to hold entities.
+                        # Avoid creating an invalid standalone entity record.
                 else:
                     if self.world.level_wrapper.version >= 2730:
                         new_data = CompoundTag({})
@@ -13377,8 +13402,8 @@ class Java(wx.Panel):
                         self.Entities_region.save()
                         print(f' 5 SAVED CHUNK NEW FILE file r.{rx}, {rz} Chunk: {cx}, {cz}')
                     else:
-                        print(f' 6 NO CHUNK DATA file r.{rx}, {rz} Chunk: {cx} , {cz} ')  # #java less than version 2730
-                        # can not store entities without leaving hole
+                        print(f' 6 NO CHUNK DATA file r.{rx}, {rz} Chunk: {cx} , {cz} ')
+                        # Avoid creating an invalid standalone entity record.
             self.world.save()
             self._load_entitie_data('0', False, self.get_all_flag)
 
@@ -15393,88 +15418,113 @@ def scale_bitmap(bitmap, width, height):
     image = image.Scale(width, height, wx.IMAGE_QUALITY_HIGH)
     return wx.Bitmap(image)
 
+def _size_map_window(window, preferred, minimum):
+    """Set usable map-dialog client bounds without overrunning the active display."""
+    display_index = wx.Display.GetFromWindow(window.GetParent() or window)
+    if display_index == wx.NOT_FOUND:
+        area = wx.GetClientDisplayRect()
+    else:
+        area = wx.Display(display_index).GetClientArea()
+    margin = window.FromDIP(24)
+    border_w = max(0, window.GetSize().width - window.GetClientSize().width)
+    border_h = max(0, window.GetSize().height - window.GetClientSize().height)
+    limit_w = max(240, area.width - margin - border_w)
+    limit_h = max(180, area.height - margin - border_h)
+    pref = window.FromDIP(wx.Size(*preferred))
+    floor = window.FromDIP(wx.Size(*minimum))
+    window.SetMinClientSize(wx.Size(min(floor.width, limit_w), min(floor.height, limit_h)))
+    window.SetClientSize(wx.Size(min(pref.width, limit_w), min(pref.height, limit_h)))
+    window.CentreOnParent()
+    pos = window.GetPosition()
+    bounds = window.GetSize()
+    window.SetPosition(wx.Point(
+        max(area.x, min(pos.x, area.x + area.width - bounds.width)),
+        max(area.y, min(pos.y, area.y + area.height - bounds.height)),
+    ))
+
 class ImportImageSettings(wx.Frame):
     def __init__(self, parent, world=None):
-        super(ImportImageSettings, self).__init__(parent, title="Import Settings", size=(300, 600),
+        super(ImportImageSettings, self).__init__(parent, title="Import Settings",
                                                   style=_float_on_parent_style())
-        parent_position = parent.GetScreenPosition()
         self.world = world
-        self.SetPosition(parent_position + (50, 50))
         self.parent = parent
-        self.font = wx.Font(14, wx.FONTFAMILY_ROMAN, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL)
+        self.font = wx.Font(11, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL)
         self.SetFont(self.font)
         self.SetForegroundColour((0, 255, 0))
         self.SetBackgroundColour((0, 0, 0))
 
-        # Color picker control
+        # Scrollable content keeps long paths and optional settings accessible on small screens.
+        self.content = scrolled.ScrolledPanel(self, style=wx.VSCROLL)
+        self.content.SetFont(self.font)
+        self.content.SetForegroundColour((0, 255, 0))
+        self.content.SetBackgroundColour((0, 0, 0))
+        self.frame_sizer = wx.BoxSizer(wx.VERTICAL)
+        self.SetSizer(self.frame_sizer)
+        self.frame_sizer.Add(self.content, 1, wx.EXPAND)
+        self.sizer = wx.BoxSizer(wx.VERTICAL)
+        self.content.SetSizer(self.sizer)
+        gap = self.FromDIP(8)
 
-        self.transparent_border = wx.CheckBox(self, label="Transparent Border?")
+        self.transparent_border = wx.CheckBox(self.content, label="Transparent Border?")
         self.transparent_border.Bind(wx.EVT_CHECKBOX, self.is_color_picker_visable)
         self.transparent_border.SetValue(True)
-        self.color_picker_label = wx.StaticText(self, label="Select A Color For Border:")
-        self.color_picker = wx.ColourPickerCtrl(self, size=(150, 40))
+        self.color_picker_label = wx.StaticText(self.content, label="Select A Color For Border:")
+        self.color_picker = wx.ColourPickerCtrl(self.content, size=self.FromDIP(wx.Size(150, 32)))
 
-        self.selected_file = wx.StaticText(self, label=" ( Dont Select File if Reusing Custom Maps )\n"
-                                                       "No File Selected")
-        self.selected_block = wx.StaticText(self, label=str(self.parent.selected_block))
-        self.ok_btn = wx.Button(self, label="OK")
+        self.selected_file = wx.StaticText(
+            self.content, label="Do not select an image if reusing custom maps.\nNo File Selected",
+            style=wx.ST_ELLIPSIZE_MIDDLE)
+        self.selected_block = wx.StaticText(self.content, label=str(self.parent.selected_block))
+        self.ok_btn = wx.Button(self.content, label="OK", size=self.FromDIP(wx.Size(110, 34)))
         self.ok_btn.Bind(wx.EVT_BUTTON, self.done)
 
-        # Custom radio box for frame type
-        self.rb_frame_type = CustomRadioBox(self, 'Frame type?', self.parent.frame_types, (0, 255, 0), md=2)
-
-        # Image file selection button
-        self._set_images_on_frames = wx.Button(self, size=(160, 40), label="Select Image File")
+        self.rb_frame_type = CustomRadioBox(
+            self.content, 'Frame type?', self.parent.frame_types, (0, 255, 0), md=2)
+        self._set_images_on_frames = wx.Button(
+            self.content, size=self.FromDIP(wx.Size(195, 36)), label="Select Image File")
         self._set_images_on_frames.Bind(wx.EVT_BUTTON, self.open_file_dialof)
-
-        # Block type selection button
-        self.apply_back_block = wx.Button(self, size=(160, 40), label="Select Backing Block")
+        self.apply_back_block = wx.Button(
+            self.content, size=self.FromDIP(wx.Size(195, 36)), label="Select Backing Block")
         self.apply_back_block.Bind(wx.EVT_BUTTON, self.parent.apply_backblock)
-
-        # Bind close event
         self.Bind(wx.EVT_CLOSE, self.on_close)
 
-        # Layout
-        self.sizer = wx.BoxSizer(wx.VERTICAL)
-        self.color_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        self.SetSizer(self.sizer)
+        self.sizer.Add(self._set_images_on_frames, 0, wx.ALL, gap)
+        self.sizer.Add(self.selected_file, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, gap)
+        self.sizer.Add(self.apply_back_block, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, gap)
+        self.sizer.Add(self.selected_block, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, gap)
+
         self.mode_sizer = wx.BoxSizer(wx.VERTICAL)
-        self.sizer.Add(self._set_images_on_frames, 0, wx.LEFT, 10)
-        self.sizer.Add(self.selected_file, 0, wx.LEFT, 10)
-        self.sizer.Add(self.apply_back_block, 0, wx.LEFT, 10)
-        self.sizer.Add(self.selected_block, 0, wx.LEFT, 10)
         if self.world.level_wrapper.platform == 'java':
             modes = ["Fast", "Better", "Lab(slow closer)"]
-            self.color_find_modes = CustomRadioBox(self, 'How to Match Colors?', modes, (0, 255, 0), md=2)
-            self.fixed_frame = wx.CheckBox(self, label="Fixed Frames No Backing Block Required")
-            self.invisible_frames = wx.CheckBox(self, label="Make Item Frames Invisible")
+            self.color_find_modes = CustomRadioBox(
+                self.content, 'How to Match Colors?', modes, (0, 255, 0), md=2)
+            self.fixed_frame = wx.CheckBox(self.content, label="Fixed Frames No Backing Block Required")
+            self.invisible_frames = wx.CheckBox(self.content, label="Make Item Frames Invisible")
             self.fixed_frame.SetValue(True)
             self.invisible_frames.SetValue(True)
-            self.sizer.Add(self.fixed_frame, 0, wx.LEFT, 10)
-            self.sizer.Add(self.invisible_frames, 0, wx.LEFT, 10)
-            self.mode_sizer.Add(self.color_find_modes, 0, wx.LEFT, 10)
+            self.sizer.Add(self.fixed_frame, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, gap)
+            self.sizer.Add(self.invisible_frames, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, gap)
+            self.mode_sizer.Add(self.color_find_modes, 0, wx.EXPAND)
 
-        self.sizer.Add(self.rb_frame_type, 0, wx.LEFT, 50)
-        self.mode_sizer.Add(self.transparent_border, 0, wx.LEFT, 10)
-        self.color_sizer.Add(self.color_picker_label, 0, wx.LEFT, 0)
-        self.color_sizer.Add(self.color_picker, 0, wx.LEFT, 0)
-
-        self.sizer.Add(self.mode_sizer)
-        self.sizer.Add(self.color_sizer, 0, wx.LEFT, 10)
-
-        self.sizer.Add(self.ok_btn, 0, wx.LEFT, 150)
+        self.sizer.Add(self.rb_frame_type, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, gap)
+        self.mode_sizer.Add(self.transparent_border, 0, wx.BOTTOM, gap)
+        self.color_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        self.color_sizer.Add(self.color_picker_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, gap)
+        self.color_sizer.Add(self.color_picker, 0)
+        self.sizer.Add(self.mode_sizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, gap)
+        self.sizer.Add(self.color_sizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, gap)
+        self.sizer.Add(self.ok_btn, 0, wx.ALIGN_RIGHT | wx.ALL, gap)
         self.sizer.Hide(self.color_sizer)
         self.sizer.Hide(self.mode_sizer)
+        self.content.SetupScrolling(scroll_x=False, scroll_y=True)
+        preferred = (510, 400) if self.world.level_wrapper.platform == 'java' else (460, 310)
+        _size_map_window(self, preferred, (410, 270))
         self.Layout()
 
-        self.Fit()
-
     def on_close(self, _):
-
         if self.world.level_wrapper.platform == 'java':
             self.java_options()
         color = self.color_picker.GetColour()
-        # Update parent frame type and color properties
         self.parent.rb_frame_type = self.rb_frame_type.GetString(self.rb_frame_type.GetSelection())
         if self.transparent_border.IsChecked():
             self.parent.color = (0, 0, 0, 0)
@@ -15485,16 +15535,15 @@ class ImportImageSettings(wx.Frame):
             self.parent.set_images_on_frames(None)
 
     def done(self, _):
-        # Similar to on_close, handles OK button press
         self.on_close(None)
 
     def is_color_picker_visable(self, _):
         if self.transparent_border.IsChecked():
-
             self.sizer.Hide(self.color_sizer)
         else:
             self.sizer.Show(self.color_sizer)
-        self.Fit()  # Adjust the frame size to fit the new layout
+        self.content.FitInside()
+        self.content.Layout()
 
     def java_options(self):
         self.parent.fixed_frame = self.fixed_frame.GetValue()
@@ -15505,64 +15554,60 @@ class ImportImageSettings(wx.Frame):
         elif selection == 2:
             self.parent.map_data_manager.color_match_mode = 'lab'
         else:
-            self.parent.map_data_manager.color_match_mode = None  # fast default
+            self.parent.map_data_manager.color_match_mode = None
 
     def open_file_dialof(self, _):
-
         with wx.FileDialog(self, "Open Image file", wildcard="*", style=wx.FD_OPEN) as file_dialog:
             if file_dialog.ShowModal() == wx.ID_CANCEL:
                 return
-            else:
-                self.selected_file.SetLabel(file_dialog.GetPath())
-                self.parent.selected_file = file_dialog.GetPath()
-                self.sizer.Show(self.mode_sizer)
-                self.Fit()
-                self.Layout()
+            self.selected_file.SetLabel(file_dialog.GetPath())
+            self.selected_file.SetToolTip(file_dialog.GetPath())
+            self.parent.selected_file = file_dialog.GetPath()
+            self.sizer.Show(self.mode_sizer)
+            self.content.FitInside()
+            self.content.Layout()
 
     def GetSelectedFrame(self):
         return self.rb_frame_type
 
-
     def SetBlock(self, text):
         self.selected_block.SetLabel(text)
+        self.content.FitInside()
 
 class BuildWallSettings(wx.Frame):
     def __init__(self, parent, maps_img_data, world=None):
-        super(BuildWallSettings, self).__init__(parent, title="Map Wall Settings", size=(300, 300),
+        super(BuildWallSettings, self).__init__(parent, title="Map Wall Settings",
                                                 style=_float_on_parent_style())
-        parent_position = parent.GetScreenPosition()
         self.world = world
         self.maps_img_data = maps_img_data
-        self.SetPosition(parent_position + (50, 50))
         self.parent = parent
-        self.font = wx.Font(16, wx.FONTFAMILY_ROMAN, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL)
+        self.font = wx.Font(11, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL)
         self.SetFont(self.font)
         self.SetForegroundColour((0, 255, 0))
         self.SetBackgroundColour((0, 0, 0))
+        gap = self.FromDIP(12)
         self.vsizer = wx.BoxSizer(wx.VERTICAL)
-        self.label_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        self.input_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        self.button_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        self.vsizer.Add(self.label_sizer)
-        self.vsizer.Add(self.input_sizer)
-        self.vsizer.Add(self.button_sizer)
+        self.input_sizer = wx.FlexGridSizer(2, 2, gap, gap)
+        self.input_sizer.AddGrowableCol(0, 1)
+        self.input_sizer.AddGrowableCol(1, 1)
 
-        self.label_col = wx.StaticText(self, label="Height: ")
-        self.label_row = wx.StaticText(self, label="Width:  ")
-        self.label_sizer.Add(self.label_col, 0, wx.LEFT, 5)
-        self.label_sizer.Add(self.label_row, 0, wx.LEFT, 35)
-        self.text_cols = wx.TextCtrl(self, size=(120, 30))
-        self.text_rows = wx.TextCtrl(self, size=(120, 30))
-        self.input_sizer.Add(self.text_cols, 0, wx.LEFT, 5)
-        self.input_sizer.Add(self.text_rows, 0, wx.LEFT, 15)
+        self.label_col = wx.StaticText(self, label="Height:")
+        self.label_row = wx.StaticText(self, label="Width:")
+        self.text_cols = wx.TextCtrl(self, size=self.FromDIP(wx.Size(120, 32)))
+        self.text_rows = wx.TextCtrl(self, size=self.FromDIP(wx.Size(120, 32)))
         self.text_cols.SetValue('4')
         self.text_rows.SetValue('4')
-        self.ok_btn = wx.Button(self, label="OK")
+        self.input_sizer.Add(self.label_col, 0)
+        self.input_sizer.Add(self.label_row, 0)
+        self.input_sizer.Add(self.text_cols, 1, wx.EXPAND)
+        self.input_sizer.Add(self.text_rows, 1, wx.EXPAND)
+        self.vsizer.Add(self.input_sizer, 1, wx.EXPAND | wx.ALL, gap)
+        self.ok_btn = wx.Button(self, label="OK", size=self.FromDIP(wx.Size(110, 34)))
         self.ok_btn.Bind(wx.EVT_BUTTON, self.done)
-        self.button_sizer.Add(self.ok_btn)
+        self.vsizer.Add(self.ok_btn, 0, wx.ALIGN_RIGHT | wx.LEFT | wx.RIGHT | wx.BOTTOM, gap)
         self.SetSizer(self.vsizer)
+        _size_map_window(self, (360, 160), (300, 145))
         self.Layout()
-        self.Fit()
         self.Show()
 
     def done(self, _):
@@ -15770,7 +15815,7 @@ class ImageGrid(wx.Panel):
         self.image_positions = {}
 
         for i in range(rows * cols):
-            placeholder = wx.Panel(self, size=(120, 120))
+            placeholder = wx.Panel(self, size=self.FromDIP(wx.Size(72, 72)))
             placeholder.SetBackgroundColour(wx.Colour(200, 200, 200))
             self.sizer.Add(placeholder, 0, wx.ALL | wx.EXPAND, 1)
             self.image_positions[i] = placeholder
@@ -15855,7 +15900,7 @@ class ImageGrid(wx.Panel):
         if image.pos_in_grid is not None:
             pos = image.pos_in_grid
             self.sizer.Hide(image)
-            placeholder = wx.Panel(self, size=(120, 120))
+            placeholder = wx.Panel(self, size=self.FromDIP(wx.Size(72, 72)))
             placeholder.SetBackgroundColour(wx.Colour(200, 200, 200))
             self.image_positions[pos] = placeholder
             self.sizer.Replace(image, placeholder)
@@ -15878,41 +15923,69 @@ class ImageSourcePanel(wx.ScrolledWindow):
 
 class BuildMapWall(wx.Frame):
     def __init__(self, col, rows, map_img_list, parent=None):
-        super().__init__(parent=parent, title="Build Map Wall", size=(800, 800),
-                         style=_float_on_parent_style())
+        super().__init__(parent=parent, title="Build Map Wall", style=_float_on_parent_style())
         self.parent = parent
-        panel = wx.Panel(self)
-        parent_position = parent.GetScreenPosition()
-
-        self.SetPosition(parent_position + (50, 50))
-        self.font = wx.Font(16, wx.FONTFAMILY_ROMAN, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL)
+        self.font = wx.Font(11, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL)
         self.SetFont(self.font)
         self.SetForegroundColour((0, 255, 0))
         self.SetBackgroundColour((0, 0, 0))
+        gap = self.FromDIP(8)
+        panel = wx.Panel(self)
+        panel.SetFont(self.font)
         self.grid_rows = col
         self.grid_cols = rows
-
-        self.grid = ImageGrid(panel, self.grid_rows, self.grid_cols)
+        self.grid_view = wx.ScrolledWindow(panel, style=wx.HSCROLL | wx.VSCROLL)
+        self.grid_view.SetScrollRate(self.FromDIP(12), self.FromDIP(12))
+        self.grid = ImageGrid(self.grid_view, self.grid_rows, self.grid_cols)
+        grid_size = self.FromDIP(wx.Size(max(380, self.grid_cols * 76),
+                                         max(360, self.grid_rows * 76)))
+        self.grid.SetMinSize(grid_size)
+        grid_sizer = wx.BoxSizer(wx.VERTICAL)
+        grid_sizer.Add(self.grid, 1, wx.EXPAND)
+        self.grid_view.SetSizer(grid_sizer)
+        self.grid_view.FitInside()
 
         self.image_source = ImageSourcePanel(panel, self.grid)
         for map_image, map_id in map_img_list:
             self.image_source.AddImage(map_image, map_id)
+        self.image_source.SetMinSize(self.FromDIP(wx.Size(190, 250)))
+        if not map_img_list:
+            self.image_source.sizer.Add(
+                wx.StaticText(self.image_source, label="No map images available"), 0, wx.ALL, gap)
+            self.image_source.FitInside()
 
-        self.image_source.SetMinSize((160, 168))
-        get_image_order = wx.Button(panel, size=(80, 50), label="Apply")
+        get_image_order = wx.Button(panel, label="Apply", size=self.FromDIP(wx.Size(105, 34)))
         get_image_order.Bind(wx.EVT_BUTTON, self.GetImageOrder)
-        _close = wx.Button(panel, size=(80, 50), label="Close")
+        _close = wx.Button(panel, label="Close", size=self.FromDIP(wx.Size(105, 34)))
         _close.Bind(wx.EVT_BUTTON, self.close)
         vbox = wx.BoxSizer(wx.VERTICAL)
         hbox = wx.BoxSizer(wx.HORIZONTAL)
-        hbox.Add(self.image_source, 0, wx.EXPAND | wx.ALL, 5)
-        hbox.Add(self.grid, 5, wx.EXPAND | wx.ALL, 0)
-        vbox.Add(hbox, 10, wx.EXPAND | wx.ALL, 0)
-        vbox.Add(get_image_order, 0, wx.CENTER, 0)
+        side = wx.BoxSizer(wx.VERTICAL)
+        main = wx.BoxSizer(wx.VERTICAL)
+        side.Add(wx.StaticText(panel, label="Available Maps"), 0, wx.BOTTOM, gap)
+        side.Add(self.image_source, 1, wx.EXPAND)
+        main.Add(wx.StaticText(panel, label="Wall Layout"), 0, wx.BOTTOM, gap)
+        main.Add(self.grid_view, 1, wx.EXPAND)
+        hbox.Add(side, 0, wx.EXPAND | wx.RIGHT, gap)
+        hbox.Add(main, 1, wx.EXPAND)
+        vbox.Add(hbox, 1, wx.EXPAND | wx.ALL, gap)
+        buttons = wx.BoxSizer(wx.HORIZONTAL)
+        buttons.Add(get_image_order, 0, wx.RIGHT, gap)
+        buttons.Add(_close, 0)
+        vbox.Add(buttons, 0, wx.ALIGN_RIGHT | wx.LEFT | wx.RIGHT | wx.BOTTOM, gap)
         panel.SetSizer(vbox)
+        frame_sizer = wx.BoxSizer(wx.VERTICAL)
+        frame_sizer.Add(panel, 1, wx.EXPAND)
+        self.SetSizer(frame_sizer)
+        # Keep the grid usable without forcing an unnecessarily large window.
+        _size_map_window(self, (
+            min(820, max(630, 280 + self.grid_cols * 76)),
+            min(620, max(450, 170 + self.grid_rows * 76)),
+        ), (600, 410))
+        self.Layout()
         self.Show()
 
-    def close(self, ):
+    def close(self, _):
         self.Close()
 
     def GetImageOrder(self, _):
@@ -16206,7 +16279,6 @@ class JavaMapData:
         else:
             z = -(abs(z) + cord_pos[facing.py_int][2])
 
-        print(x, y, z, position)
         entitle_compound = CompoundTag({
             'Motion': ListTag([DoubleTag(0), DoubleTag(0), DoubleTag(0)]),
             'Facing': facing,
@@ -16610,7 +16682,27 @@ class BedrockMapData:
         self.parent._custom_map_list.GetEventHandler().ProcessEvent(self.parent._custom_event)
 
     def get_map_colors(self, key):
-        return self.all_map[key]['colors'].py_data
+        # A zero-filled map can be excluded by the normal list filter but
+        # still be referenced by a saved custom map.
+        map_data = self.all_map.get(key)
+        if map_data is None:
+            try:
+                raw = self.level_db.get(key.encode('utf-8'))
+            except KeyError:
+                raw = None
+            if raw is None:
+                raise KeyError(f"Map data for {key!r} is missing from the world")
+            map_data = load(raw, compressed=False, little_endian=True,
+                            string_decoder=utf8_escape_decoder).tag
+            self.all_map[key] = map_data
+
+        colors = map_data.get('colors')
+        if colors is None:
+            raise ValueError(f"Map data for {key!r} does not contain colors")
+        rgba = bytes(colors.py_data)
+        if len(rgba) != 128 * 128 * 4:
+            raise ValueError(f"Map data for {key!r} contains {len(rgba)} color bytes, expected 65536")
+        return rgba
 
     def get_colors_from_map(self, _file_path):
         color_data = _file_path.get('colors', None)
@@ -16706,46 +16798,39 @@ class BedrockMapData:
         return _map
 
     def del_selected_map(self, key):
+        def referenced_maps(cmap_nbt):
+            map_list = cmap_nbt.get('map_list')
+            if map_list is None:
+                raise ValueError("Custom map has no map_list")
+            return [entry.py_str for entry in map_list.py_data]
 
-        def check_for_matching_cmap(name, current_map_list):
+        if key.startswith('cmap_'):
+            # Work out every reference before writing so malformed lists cannot
+            # trigger partial deletion of this custom map's underlying tiles.
+            own_map_keys = referenced_maps(self.custom_map[key])
+            other_map_keys = set()
+            for other_name, other_nbt in self.custom_map.items():
+                if other_name != key:
+                    other_map_keys.update(referenced_maps(other_nbt))
 
-            for n, f in self.custom_map.items():
-                if n != name:
-                    nbt = f
-                    map_list = nbt.get('map_list').py_data
-                    for m in map_list:
-                        if m in current_map_list:
-                            current_map_list.remove(m)
-            for rm in current_map_list:  # safe to delete no other cmaps contain map
-                self.level_db.delete(rm.encode())
+            if own_map_keys and 'map_-' not in own_map_keys[0]:
+                for map_key in dict.fromkeys(own_map_keys):
+                    if map_key not in other_map_keys:
+                        self.level_db.delete(map_key.encode('utf-8'))
+            self.level_db.delete(key.encode('utf-8'))
+            return
 
-        def check_for_matching_map(name):
-            map_in_cmap = []
-            for k, f in self.custom_map.items():
-
-                nbt = f
-                map_list = nbt.get('map_list').py_data
-                cmap_name = k
-                if name in str(map_list):
-                    map_in_cmap.append(cmap_name)
-            if len(map_in_cmap) > 0:
-                wx.MessageBox(f"This {name} is part of custom map/'s\n"
-                              f"Remove theses custom maps and try again: \n{map_in_cmap} ",
-                              "Can Not Remove",
-                              wx.OK | wx.ICON_ERROR)
-            else:
-                self.level_db.delete(name.encode())
-
-        if 'cmap_' in key:
-            nbt = self.custom_map[key]
-            map_list = nbt.get('map_list').py_data
-            if 'map_-' not in map_list[0].py_str:
-                check_for_matching_cmap(key, map_list)
-                self.level_db.delete(key.encode())
-            else:
-                self.level_db.delete(key.encode())
-        else:
-            check_for_matching_map(key)
+        referencing_custom_maps = [
+            cmap_name for cmap_name, cmap_nbt in self.custom_map.items()
+            if key in referenced_maps(cmap_nbt)
+        ]
+        if referencing_custom_maps:
+            wx.MessageBox(
+                f"This {key} is part of custom maps.\n"
+                f"Remove these custom maps and try again: \n{referencing_custom_maps}",
+                "Can Not Remove", wx.OK | wx.ICON_ERROR)
+            return
+        self.level_db.delete(key.encode('utf-8'))
 
     def delete_all_maps(self):
 
@@ -16793,16 +16878,32 @@ class BedrockMapData:
 
     @property
     def get_available_map_key(self):
-        if len(self.all_map) == 0 and len(self.temp_new_map_keys) == 0:
-            self.temp_new_map_keys.append(f'map_{0}')
-            return f'map_{0}'
-        else:
-            for i in range(len(self.all_map) + len(self.temp_new_map_keys)):
-                next_map_key = f'map_{i + 1}'
-                if not self.all_map.get(next_map_key, None):
-                    if next_map_key not in self.temp_new_map_keys:
-                        self.temp_new_map_keys.append(next_map_key)
-                        return next_map_key
+        # Check LevelDB, the filtered display cache, and saved custom-map
+        # references. Never reuse an orphaned ID still named by a custom map.
+        referenced_keys = set()
+        for cmap_nbt in self.custom_map.values():
+            entries = cmap_nbt.get('map_list')
+            if entries is not None:
+                referenced_keys.update(entry.py_str for entry in entries.py_data)
+
+        def available(key):
+            if key in self.all_map or key in self.temp_new_map_keys or key in referenced_keys:
+                return False
+            try:
+                return self.level_db.get(key.encode('utf-8')) is None
+            except KeyError:
+                return True
+
+        if not self.all_map and not self.temp_new_map_keys and available('map_0'):
+            self.temp_new_map_keys.append('map_0')
+            return 'map_0'
+        next_id = 1
+        while True:
+            next_map_key = f'map_{next_id}'
+            if available(next_map_key):
+                self.temp_new_map_keys.append(next_map_key)
+                return next_map_key
+            next_id += 1
 
     @property
     def level_db(self):
@@ -16913,17 +17014,17 @@ class SetFrames(wx.Frame):
         self.middle_sizer.Add(self._map_list, 1, wx.EXPAND)
         self.middle_sizer.Add(self._custom_map_list, 1, wx.EXPAND | wx.LEFT, pad)
 
-        self._up = wx.Button(self, label="up", size=(40, 20))
+        self._up = wx.Button(self, label="up", size=self.FromDIP(wx.Size(78, 34)))
         self._up.Bind(wx.EVT_BUTTON, self._boxUp)
-        self._down = wx.Button(self, label="down", size=(40, 20))
+        self._down = wx.Button(self, label="down", size=self.FromDIP(wx.Size(78, 34)))
         self._down.Bind(wx.EVT_BUTTON, self._boxDown)
-        self._east = wx.Button(self, label="east", size=(40, 20))
+        self._east = wx.Button(self, label="east", size=self.FromDIP(wx.Size(78, 34)))
         self._east.Bind(wx.EVT_BUTTON, self._boxEast)
-        self._west = wx.Button(self, label="west", size=(40, 20))
+        self._west = wx.Button(self, label="west", size=self.FromDIP(wx.Size(78, 34)))
         self._west.Bind(wx.EVT_BUTTON, self._boxWest)
-        self._north = wx.Button(self, label="north", size=(40, 20))
+        self._north = wx.Button(self, label="north", size=self.FromDIP(wx.Size(78, 34)))
         self._north.Bind(wx.EVT_BUTTON, self._boxNorth)
-        self._south = wx.Button(self, label="south", size=(40, 20))
+        self._south = wx.Button(self, label="south", size=self.FromDIP(wx.Size(78, 34)))
         self._south.Bind(wx.EVT_BUTTON, self._boxSouth)
 
         self.move_grid = wx.GridSizer(3, 2, 1, 1)
@@ -16944,18 +17045,19 @@ class SetFrames(wx.Frame):
 
         self.grid_options = wx.GridSizer(0, 3, 1, 1)
         self.button_grid_sizer = wx.BoxSizer(wx.VERTICAL)
-        self.custom_map_name_label = wx.StaticText(self, label="Name Custom Map Entry:", size=(160, 25))
+        self.custom_map_name_label = wx.StaticText(self, label="Name Custom Map Entry:")
         self.custom_map_name = wx.TextCtrl(self, style=wx.TEXT_ALIGNMENT_LEFT)
-        self.direction_label = wx.StaticText(self, label="Set The Orientation:↓", size=(125, 22))
-        self.position_label = wx.StaticText(self, label="Fine Tune Box Area:↓", size=(129, 22))
+        self.direction_label = wx.StaticText(self, label="Set The Orientation:↓")
+        self.position_label = wx.StaticText(self, label="Fine Tune Box Area:↓")
 
-        self.pointing = wx.ListBox(self, style=wx.LB_SINGLE, size=(115, 110),
+        self.pointing = wx.ListBox(self, style=wx.LB_SINGLE, size=self.FromDIP(wx.Size(150, 130)),
                                    choices=[x for x in self.map_data_manager.pointing.keys()])
 
-        self.facing = wx.ListBox(self, style=wx.LB_SINGLE, size=(115, 110),
+        self.facing = wx.ListBox(self, style=wx.LB_SINGLE, size=self.FromDIP(wx.Size(150, 130)),
                                  choices=[x for x in self.map_data_manager.facing.keys()])
 
-        self.apply_preview = wx.Button(self, size=(80, 40), label="Place Image\n  On Frames")
+        self.apply_preview = wx.Button(
+            self, size=self.FromDIP(wx.Size(156, 58)), label="Place Image\nOn Frames")
 
         self.pointing.Bind(wx.EVT_LISTBOX, self.pointing_onclick)
         self.facing.Bind(wx.EVT_LISTBOX, self.facing_onclick)
@@ -16966,7 +17068,7 @@ class SetFrames(wx.Frame):
         self.label_sizer.Add(self.position_label, 0, wx.LEFT, 40)
 
         self.button_grid_sizer.Add(self.move_grid, 0, wx.TOP, 2)
-        self.button_grid_sizer.Add(self.apply_preview, 0, wx.TOP, 6)
+        self.button_grid_sizer.Add(self.apply_preview, 0, wx.EXPAND | wx.TOP, pad)
 
         self.grid_options.Add(self.pointing)
         self.grid_options.Add(self.facing)
@@ -16987,20 +17089,57 @@ class SetFrames(wx.Frame):
         self.Thaw()
 
     def build_map_wall(self, _):
+        # Both individual map records and tiles referenced by custom maps
+        # can be reused when composing a new map wall.
+        manager = self.map_data_manager
+        manager.refresh_all()
+        map_names = list(manager.all_map)
+
+        if self.platform == 'bedrock':
+            # Blank tiles may be filtered from all_map but still exist in
+            # LevelDB and be referenced by saved custom maps.
+            known = set(map_names)
+            for custom_nbt in manager.custom_map.values():
+                references = custom_nbt.get('map_list')
+                if references is None:
+                    continue
+                for entry in references.py_data:
+                    name = entry.py_str
+                    if name.startswith('map_') and name not in known:
+                        map_names.append(name)
+                        known.add(name)
+
         map_data = []
-        for name, file in self.map_data_manager.all_map.items():
-            if self.platform == 'java':
-                if 'map_-' not in name:
-                    nbt = load(file)
-                    img = self.map_data_manager.get_map_img(nbt['data'].get('colors').py_data)
-                    map_data.append((img, name))
-            else:
-                if 'map_-' in name:
-                    nbt = self.map_data_manager.all_map[name]
+        skipped = []
+        for name in map_names:
+            try:
+                if self.platform == 'java':
+                    nbt = load(manager.all_map[name])
+                    colors = nbt['data'].get('colors')
+                    if colors is None or len(colors.py_data) != 128 * 128:
+                        raise ValueError('Map has no valid 128 x 128 color data')
+                    img = manager.get_map_img(colors.py_data)
+                else:
+                    rgba = manager.get_map_colors(name)
+                    bitmap = wx.Bitmap.FromBufferRGBA(128, 128, rgba)
+                    img = scale_bitmap(bitmap, 128, 128)
+            except (KeyError, ValueError, TypeError, OSError):
+                skipped.append(name)
+                continue
+            map_data.append((img, name))
 
-                    img = self.map_data_manager.get_map_img(name)
-                    map_data.append((img, name))
+        if not map_data:
+            wx.MessageBox(
+                'No usable map tiles were found. Import a map image or '
+                'check the saved map records before building a wall.',
+                'No Maps Available', wx.OK | wx.ICON_INFORMATION)
+            return
 
+        if skipped:
+            wx.MessageBox(
+                f'Skipped {len(skipped)} unavailable or invalid map tiles. '
+                'The remaining tiles are available for the wall.',
+                'Some Maps Unavailable', wx.OK | wx.ICON_WARNING)
         BuildWallSettings(self, map_data, world=self.world)
 
     def custom_map_wall_add(self):
@@ -17014,7 +17153,6 @@ class SetFrames(wx.Frame):
 
         self.custom_map_loaded = True
         map_list, rows, cols = self.custom_map_wall
-        print(self.custom_map_wall, 'yea', map_list, rows, cols)
         self.pointing.SetSelection(2)
         self.facing.SetSelection(2)
         self.map_data_manager.cols_rows = (cols, rows)
@@ -17109,28 +17247,35 @@ class SetFrames(wx.Frame):
     def _initialize_window(self):
         """Initialize the window and its components."""
         translation_manager = PyMCTranslate.new_translation_manager()
-        self.window = wx.Frame(self, title="Choose back block", size=(500, 400),
+        self.window = wx.Frame(self, title="Choose back block",
                                style=_float_on_parent_style())
-        self.window.Centre(direction=wx.VERTICAL)
 
         self._block_define = BlockDefine(self.window, translation_manager, wx.VERTICAL,
                                          platform=self.world.level_wrapper.platform)
 
+        # Give the property editor a little more room for long block-state names.
+        best = self._block_define.GetBestSize()
+        self._block_define.SetMinSize(wx.Size(
+            best.width + self.window.FromDIP(24),
+            best.height + self.window.FromDIP(20)))
         self.sizer = wx.BoxSizer(wx.VERTICAL)
-        self.ok_sizer = wx.BoxSizer(wx.VERTICAL)
         self.window.SetSizer(self.sizer)
-        self.ok_btn = wx.Button(self.window, label="OK", size=(100, 25))
+        self.ok_btn = wx.Button(self.window, label="OK")
+        self.ok_btn.SetMinSize(self.window.FromDIP(wx.Size(96, 30)))
         self.ok_btn.Bind(wx.EVT_BUTTON, self.done)
 
-        # Set proportion to 0 to avoid stretching and align center
-        self.ok_sizer.Add(self._block_define, 0, wx.LEFT, 0)
-        self.ok_sizer.Add(self.ok_btn, 0, wx.ALIGN_CENTER)
+        gap = self.window.FromDIP(8)
+        self.sizer.Add(self._block_define, 1, wx.EXPAND | wx.ALL, gap)
+        self.sizer.Add(self.ok_btn, 0,
+                       wx.ALIGN_CENTER_HORIZONTAL | wx.LEFT | wx.RIGHT | wx.BOTTOM, gap)
 
-        self.sizer.Add(self.ok_sizer, 1, wx.LEFT, 0)
-
-        self.sizer.Fit(self.window)
-        self.window.Layout()
         self._hide_version_select()
+        # Use the block selector's natural size instead of an oversized
+        # DPI-scaled client size. The selector expands when resized.
+        self.window.Layout()
+        self.window.Fit()
+        self.window.CentreOnParent()
+        _clamp_window_to_display(self.window)
         self.window.Bind(wx.EVT_CLOSE, self._unbind_events)
 
     def done(self, _):
@@ -17195,14 +17340,15 @@ class SetFrames(wx.Frame):
         self.dlg.SetBlock(data.block_name)
 
     def set_block(self, event):
-        x, y, z = self.canvas.selection.selection_group.min
+        # Point-change events provide the position before the selection box
+        # is updated. An empty selection must not prevent block inspection.
+        x, y, z = event.point
         cx, cz = block_coords_to_chunk_coords(x, z)
         if self.world.has_chunk(cx, cz, self.canvas.dimension):
             block, enty = self.world.get_version_block(x, y, z, self.canvas.dimension,
                                                        (self.world.level_wrapper.platform,
                                                         self.world.level_wrapper.version))
             self.selected_block = block
-
 
         event.Skip()
 
@@ -17221,7 +17367,6 @@ class SetFrames(wx.Frame):
         if evt.action_id == ACT_BOX_CLICK:
             if block_define and self.selected_block:
                 block_define.block = self.selected_block
-                print(block_define.block)
             if self._is_enabled:
                 self._moving = not self._moving
                 self._is_enabled = False
@@ -17279,29 +17424,46 @@ class SetFrames(wx.Frame):
                 item.Destroy()
 
     def save_image_grid(self, _):
-        grid_rows, grid_cols = self.grid_preview.GetRows(), self.grid_preview.GetCols()
         cmap = self._custom_map_list.GetStringSelection()
-        imgs = self.map_data_manager.get_cmap_list_of_map_images(cmap)
+        if not cmap:
+            return
+        try:
+            imgs = self.map_data_manager.get_cmap_list_of_map_images(cmap)
+        except (KeyError, ValueError, OSError) as exc:
+            wx.MessageBox(f"Cannot export custom map {cmap!r}:\n{exc}",
+                          "Map Data Unavailable", wx.OK | wx.ICON_ERROR)
+            return
+
+        grid_rows, grid_cols = self.grid_preview.GetRows(), self.grid_preview.GetCols()
+        if grid_rows <= 0 or grid_cols <= 0 or len(imgs) != grid_rows * grid_cols:
+            wx.MessageBox("The custom map's image count does not match the preview grid.",
+                          "Map Data Unavailable", wx.OK | wx.ICON_ERROR)
+            return
         combined_img = Image.new('RGBA', (grid_cols * 128, grid_rows * 128))
         for index, img in enumerate(imgs):
             row = index // grid_cols
             col = index % grid_cols
-            position = (col * 128, row * 128)
-            combined_img.paste(img, position)
+            combined_img.paste(img, (col * 128, row * 128))
 
         with wx.FileDialog(self, "Save file", wildcard="PNG files (*.png)|*.png|All files (*.*)|*.*",
                            style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT) as save_dialog:
-
-            # Show the dialog and check if the user clicked "Save"
             if save_dialog.ShowModal() == wx.ID_CANCEL:
-                return  # User canceled, exit the function
-
-            # Get the path selected by the user
-            save_path = save_dialog.GetPath()
-            combined_img.save(save_path, format='PNG')
+                return
+            combined_img.save(save_dialog.GetPath(), format='PNG')
 
     def on_focus_custom_map_list(self, evt):
         self.map_data_manager.refresh_all()
+        selected_cmap = self._custom_map_list.GetStringSelection()
+        if not selected_cmap:
+            return
+        try:
+            custom_map_nbt = self.map_data_manager.get_custom_map_nbt(selected_cmap)
+            selected_maps = [s.py_str for s in custom_map_nbt.get('map_list').py_data]
+            map_data = [self.map_data_manager.get_map_colors(m) for m in selected_maps]
+        except (KeyError, ValueError, OSError) as exc:
+            wx.MessageBox(f"Cannot load custom map {selected_cmap!r}:\n{exc}",
+                          "Map Data Unavailable", wx.OK | wx.ICON_ERROR)
+            return
         self._map_list.SetSelection(-1)
         self._map_list.Hide()
 
@@ -17312,7 +17474,7 @@ class SetFrames(wx.Frame):
         self._save_map_image.Show()
         self.custom_map_loaded = True
 
-        custom_map_nbt = self.map_data_manager.get_custom_map_nbt(self._custom_map_list.GetStringSelection())
+        # Map record and referenced tile bytes were validated before changing the preview.
         lx, ly, lz, rx, ry, rz = custom_map_nbt.get('selectionGp').py_data
         cx, cy, cz = custom_map_nbt.get('location').py_data
         r1, r2 = custom_map_nbt.get('rotation').py_data
@@ -17323,12 +17485,9 @@ class SetFrames(wx.Frame):
         self.pointing.SetSelection(pointing)
         self.facing.SetSelection(facing)
         self.map_data_manager.cols_rows = (cols, rows)
-        self.selected_maps = [s.py_str for s in custom_map_nbt.get('map_list').py_data]
-        self.map_data = []
+        self.selected_maps = selected_maps
+        self.map_data = map_data
         total = len(self.selected_maps)
-
-        for m in self.selected_maps:
-            self.map_data.append(self.map_data_manager.get_map_colors(m))
 
         def add_images(grid):
             cnt = 0
@@ -17514,7 +17673,8 @@ class SetFrames(wx.Frame):
                 tile = new_image_array[y:y + tile_size, x:x + tile_size]
                 flattened_pixels = tile.reshape(-1).tobytes()
                 self.map_key = self.map_data_manager.get_available_map_key
-                print(self.map_key)
+                if self.map_key is None:
+                    raise RuntimeError("Unable to reserve an available map ID")
                 map_id = int(self.map_key.replace('map_', ''))
                 self.map_data_manager.maps_tobe.append((flattened_pixels, map_id, self.map_key))
 
@@ -17576,30 +17736,36 @@ class SetFrames(wx.Frame):
         return cords_sorted, rotation
 
     def _run_del_maps(self, _):
-
-        wxx = wx.MessageBox("You are going to deleted EVERY MAP \n Every entry in the list",
-                            "This can't be undone Are you Sure?", wx.OK | wx.CANCEL | wx.ICON_INFORMATION)
-        if wxx == int(16):
+        # Only explicit confirmation may initiate irreversible map deletion.
+        if wx.MessageBox(
+                "Delete every map and custom map in this world?\n"
+                "This cannot be undone.",
+                "Confirm Delete All Maps",
+                wx.OK | wx.CANCEL | wx.CANCEL_DEFAULT | wx.ICON_WARNING,
+                self) != wx.ID_OK:
             return
         self.Freeze()
-        self.map_data_manager.delete_all_maps()
-        self.map_data_manager.refresh_all()
-        self._map_list.Update()
-        self._custom_map_list.Update()
-        self._map_list.Clear()
-        self._custom_map_list.Clear()
-        self._custom_map_list.AppendItems([x for x in self.map_data_manager.custom_map.keys()])
-        self._map_list.AppendItems([x for x in self.map_data_manager.all_map.keys()])
-        self.clear_grid_preview()
-        self.grid_preview.Hide(self, recursive=True)
-        self.grid_preview.Clear()
-        self._sizer.Hide(self.custom_name_sizer)
-        self._sizer.Hide(self.label_sizer)
-        self._sizer.Hide(self.grid_options)
-        self._sizer.Fit(self)
-        self.Fit()
-        self.Layout()
-        self.Thaw()
+        try:
+            self.map_data_manager.delete_all_maps()
+            self.map_data_manager.refresh_all()
+            self._map_list.Update()
+            self._custom_map_list.Update()
+            self._map_list.Clear()
+            self._custom_map_list.Clear()
+            self._custom_map_list.AppendItems([x for x in self.map_data_manager.custom_map.keys()])
+            self._map_list.AppendItems([x for x in self.map_data_manager.all_map.keys()])
+            self.clear_grid_preview()
+            self.grid_preview.Hide(self, recursive=True)
+            self.grid_preview.Clear()
+            self._sizer.Hide(self.custom_name_sizer)
+            self._sizer.Hide(self.label_sizer)
+            self._sizer.Hide(self.grid_options)
+            self._sizer.Fit(self)
+            self.Fit()
+            self.Layout()
+        finally:
+            # Avoid leaving the map window frozen if LevelDB raises an error.
+            self.Thaw()
 
     def _move_box(self, dx=0, dy=0, dz=0):
         for box in self.canvas.selection.selection_group.selection_boxes:
@@ -19299,7 +19465,7 @@ class HardCodedSpawns(wx.Frame):
             elif 'minecraft:the_nether' in self.canvas.dimension:
                 dim = int(1).to_bytes(4, 'little', signed=True)
             elif 'minecraft:overworld' in self.canvas.dimension:
-                dim = b''  # int(0).to_bytes(4, 'little', signed=True)
+                dim = b''
             return dim
 
         found = []
@@ -19351,7 +19517,7 @@ class HardCodedSpawns(wx.Frame):
             elif 'minecraft:the_nether' in self.canvas.dimension:
                 dim = int(1).to_bytes(4, 'little', signed=True)
             elif 'minecraft:overworld' in self.canvas.dimension:
-                dim = b''  # int(0).to_bytes(4, 'little', signed=True)
+                dim = b''
             return dim
 
         for x, z in sel_chunks:
@@ -19925,7 +20091,7 @@ class BufferWorldTool(wx.Frame):
         elif 'minecraft:the_nether' in self.canvas.dimension:
             dim = int(1).to_bytes(4, 'little', signed=True)
         elif 'minecraft:overworld' in self.canvas.dimension:
-            dim = b''  # int(0).to_bytes(4, 'little', signed=True)
+            dim = b''
         return dim
 
     def put_data_back(self, _):
@@ -20714,7 +20880,7 @@ class SelectionOrganizer(wx.Frame):
         for d in new_data.split("\n"):
 
 
-            if not self.chk.GetValue(): #len(d.split(",")) >= 6:
+            if not self.chk.GetValue():
                 x, y, z, xx, yy, zz = d.split(",")
             else:
 
@@ -21456,7 +21622,7 @@ class Tools(wx.Frame):
             for k, v in self.world.level_wrapper.level_db.iterate(
                     start=b'\x00', end=b'\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff'):
                 if k[-1] == 0x31 and 9 <= len(k) <= 13:
-                    nbt =  unpack_nbt_list(v)#load(v, compressed=False, little_endian=True, string_decoder=utf8_escape_decoder)
+                    nbt =  unpack_nbt_list(v)
                     for x in nbt:
                         if x.get('Items'):
                             items = x.get('Items')
