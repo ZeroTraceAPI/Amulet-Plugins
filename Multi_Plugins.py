@@ -5735,164 +5735,207 @@ class ItemTools:
         frame.Show()
 
     def edit_enchants(self, _self):
-        from wx import CheckBox, TextCtrl, Button, StaticText, BoxSizer, Frame, Panel, EVT_CHECKBOX, EVT_BUTTON, \
-            ALL, \
-            VERTICAL, HORIZONTAL
+        from wx import CheckBox, TextCtrl, Button, StaticText, BoxSizer, Frame, EVT_CHECKBOX, EVT_BUTTON, ALL, VERTICAL, HORIZONTAL
+
         font = wx.Font(11, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD)
         BLACK = wx.Colour(0, 0, 0)
         GREEN = wx.Colour(0, 255, 0)
 
-        def on_check(evt):
-            """Handle checkbox click to enable/disable level inputs."""
-            checkbox = evt.GetEventObject()
-            idx = checkbox.GetId()
-            level_ctrl = enchant_level_inputs.get(idx)
-            if level_ctrl:
-                level_ctrl.Enable(checkbox.IsChecked())
-        def unselect(evt):
-            """Uncheck all enchants and disable their level inputs."""
-            for name, cb in enchant_checkboxes.items():
-                cb.SetValue(False)
-                lvl_ctrl = enchant_level_inputs.get(cb.GetId())
-                if lvl_ctrl:
-                    lvl_ctrl.SetValue("0")
-                    lvl_ctrl.Enable(False)
-
-        def select_best(evt):
-            """Select the best enchantments based on the item type."""
-            item_type = get_item_type(current_nbt['Name'].py_str.split(':')[1])
-            allowed_ids = valid_enchants.get(item_type, [])
-            for ench_id in allowed_ids:
-                name = enchantments[ench_id]
-                cb = enchant_checkboxes.get(name)
-                if cb:
-                    cb.SetValue(True)  # Check the box
-                    enchant_level_inputs[cb.GetId()].SetValue(str(max_levels.get(ench_id, 1)))  # Set level
-                    enchant_level_inputs[cb.GetId()].Enable(True)  # Enable the input
-
-        def save_data(evt):
-            """Save selected enchantments and their levels to NBT."""
-            tag_list = ListTag()
-            for name, cb in enchant_checkboxes.items():
-                if cb.IsChecked():
-                    ench_id = [k for k, v in enchantments.items() if v == name][0]
-                    lvl = int(enchant_level_inputs[cb.GetId()].GetValue())
-                    tag_list.append(CompoundTag({'id': ShortTag(ench_id), 'lvl': ShortTag(lvl)}))
-
-            # Retrieve the current NBT data
-            key, slot = _self.Get_slot_map_key()
-            keys = _self.editor.keys + [key]
-            current_nbt = _self.editor.selected_player[keys]
-
-            title = _self.Parent.Parent.GetTitle()
-            panel.Close()
-
-            if any(ct in title for ct in CONTAINER_TYPES):
-                if len(current_nbt) > 0:
-                     for i, x in enumerate(current_nbt):
-                         if x['Slot'].py_int == slot:
-                            slot = i
-            tag = current_nbt[slot]['tag']
-
-            tag['Damage'] = IntTag(0)
-            tag['ench'] = tag_list
-
-            # Save the modified NBT data
-            nbt = _self.editor.selected_player[_self.editor.keys]
-
-            _self.editor.selected_player.save_player()
-
-        # Initial setup and main UI creation
-
         title = _self.Parent.Parent.GetTitle()
-        # Determine the slot number, ensuring it is valid
         key, slot = _self.Get_slot_map_key()
         keys = _self.editor.keys + [key]
-        current_nbt = _self.editor.selected_player[keys]
-
+        container = _self.editor.selected_player[keys]
         if any(ct in title for ct in CONTAINER_TYPES):
-            if len(current_nbt) > 0:
-                for i, x in enumerate(current_nbt):
-                    if x['Slot'].py_int == slot:
-                        slot = i
-                        break
+            for index, entry in enumerate(container):
+                if entry['Slot'].py_int == slot:
+                    slot = index
+                    break
+        current_nbt = container[slot]
+        item_type = get_item_type(current_nbt['Name'].py_str.split(':')[-1])
+        normal_ids = list(valid_enchants.get(item_type, []))
+        all_ids = list(enchantments)
+        has_restricted_list = bool(normal_ids) and set(normal_ids) != set(all_ids)
+        source_enchants = list(current_nbt.get('tag', {}).get('ench', []))
+        existing_enchants = {entry['id'].py_int: entry['lvl'].py_int for entry in source_enchants}
 
-        current_nbt = current_nbt[slot]
-        item_type = get_item_type(current_nbt['Name'].py_str.split(':')[1])
         panel = Frame(_self, title="Edit Enchants", style=_float_on_parent_style())
         panel.SetBackgroundColour(BLACK)
         main_sizer = BoxSizer(VERTICAL)
+        level_inputs = {}
         enchant_checkboxes = {}
-        enchant_level_inputs = {}
-        # Create top bar with buttons for selecting best enchants and saving data
+        visible_ids = []
+
         top_bar = BoxSizer(HORIZONTAL)
         best_button = Button(panel, label="Select All")
-        best_button.Bind(EVT_BUTTON, select_best)
-        unselect_button = Button(panel, label="UnSelect All")
-        unselect_button.Bind(EVT_BUTTON, unselect)
+        unselect_button = Button(panel, label="Unselect All")
         save_button = Button(panel, label="Save Enchants")
-        save_button.Bind(EVT_BUTTON, save_data)
-        best_button.SetForegroundColour(GREEN)
-        best_button.SetBackgroundColour(BLACK)
-
-        save_button.SetForegroundColour(GREEN)
-        save_button.SetBackgroundColour(BLACK)
-        best_button.SetFont(font)
-        save_button.SetFont(font)
-        top_bar.Add(unselect_button,0, ALL, 5)
+        for button in (best_button, save_button):
+            button.SetForegroundColour(GREEN)
+            button.SetBackgroundColour(BLACK)
+            button.SetFont(font)
+        top_bar.Add(unselect_button, 0, ALL, 5)
         top_bar.Add(best_button, 0, ALL, 5)
         top_bar.Add(save_button, 0, ALL, 5)
-        main_sizer.Add(top_bar)
+        main_sizer.Add(top_bar, 0, wx.ALL, 2)
 
-        # Instructions for the user
-        main_sizer.Add(StaticText(panel, label="Enchant (Check to apply, set level):"), 0, ALL, 5)
-        # Get allowed enchantments for the current item type
-        allowed_ids = valid_enchants.get(item_type, [])
-        tag_data_ench = current_nbt.get('tag', {}).get('ench', [])
-        existing_enchants = {x['id'].py_int: x['lvl'].py_int for x in tag_data_ench}
+        mode_checkbox = None
+        if has_restricted_list:
+            mode_checkbox = CheckBox(panel, label="Show all enchantments")
+            mode_checkbox.SetForegroundColour(GREEN)
+            mode_checkbox.SetBackgroundColour(BLACK)
+            main_sizer.Add(mode_checkbox, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+        main_sizer.Add(StaticText(panel, label="Enchant (check to apply, set level):"),
+                       0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
 
-        # Loop through each allowed enchantment and set up UI controls for it
-        from wx import FlexGridSizer
+        scroll_panel = wx.ScrolledWindow(panel, style=wx.VSCROLL | wx.HSCROLL)
+        scroll_panel.SetBackgroundColour(BLACK)
+        scroll_panel.SetScrollRate(panel.FromDIP(12), panel.FromDIP(12))
+        grid_sizer = wx.FlexGridSizer(rows=0, cols=6, hgap=10, vgap=5)
+        for column in (1, 3, 5):
+            grid_sizer.AddGrowableCol(column)
+        scroll_panel.SetSizer(grid_sizer)
+        main_sizer.Add(scroll_panel, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+        mode_note = StaticText(panel, label="Custom enchantments may have no gameplay effect.")
+        main_sizer.Add(mode_note, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+        panel.SetSizer(main_sizer)
 
-        # Each enchantment takes 2 cells: checkbox + level input
-        # 3 enchantments per row = 6 columns total
-        grid_sizer = FlexGridSizer(rows=0, cols=6, hgap=10, vgap=5)
-        grid_sizer.AddGrowableCol(1)
-        grid_sizer.AddGrowableCol(3)
-        grid_sizer.AddGrowableCol(5)
+        def on_check(evt):
+            cb = evt.GetEventObject()
+            level_inputs[cb.GetId()].Enable(cb.IsChecked())
 
-        for ench_id in allowed_ids:
-            name = enchantments[ench_id]
-            level = existing_enchants.get(ench_id, 1)
-
-            cb_id = wx.NewIdRef()
-            cb = CheckBox(panel, id=cb_id.GetId(), label=name)
+        for ench_id in all_ids:
+            cb = CheckBox(scroll_panel, label=enchantments[ench_id])
             cb.SetFont(font)
             cb.SetForegroundColour(GREEN)
             cb.SetBackgroundColour(BLACK)
+            cb.SetValue(ench_id in existing_enchants)
             cb.Bind(EVT_CHECKBOX, on_check)
-            if ench_id in existing_enchants:
-                cb.SetValue(True)
-
-            lvl = TextCtrl(panel, size=(50, -1), style=wx.TE_CENTER)
+            lvl = TextCtrl(scroll_panel, size=(panel.FromDIP(55), -1), style=wx.TE_CENTER)
             lvl.SetFont(font)
-            lvl.SetValue(str(level))
+            lvl.SetValue(str(existing_enchants.get(ench_id, 1)))
             lvl.Enable(ench_id in existing_enchants)
             lvl.SetForegroundColour(GREEN)
             lvl.SetBackgroundColour(BLACK)
-            enchant_checkboxes[name] = cb
-            enchant_level_inputs[cb_id.GetId()] = lvl
+            enchant_checkboxes[ench_id] = cb
+            level_inputs[cb.GetId()] = lvl
+            cb.Hide()
+            lvl.Hide()
 
-            # Add both to the grid
-            grid_sizer.Add(cb, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 3)
-            grid_sizer.Add(lvl, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 3)
+        def update_choices(show_all):
+            visible_ids[:] = all_ids if show_all or not normal_ids else normal_ids
+            grid_sizer.Clear(delete_windows=False)
+            for ench_id in all_ids:
+                if ench_id not in visible_ids:
+                    cb = enchant_checkboxes[ench_id]
+                    cb.Hide()
+                    level_inputs[cb.GetId()].Hide()
+            # Preserve the original item-specific enchantment ordering.
+            for ench_id in visible_ids:
+                cb = enchant_checkboxes[ench_id]
+                lvl = level_inputs[cb.GetId()]
+                grid_sizer.Add(cb, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 3)
+                grid_sizer.Add(lvl, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 3)
+                cb.Show()
+                lvl.Show()
+            mode_note.Show(show_all or not normal_ids)
+            scroll_panel.FitInside()
+            main_sizer.Layout()
+            # Keep the expanded catalog scrollable rather than fitting it beyond the display.
+            try:
+                display_index = wx.Display.GetFromWindow(panel)
+                display = wx.Display(display_index) if display_index != wx.NOT_FOUND else wx.Display()
+                bounds = display.GetClientArea()
+            except Exception:
+                bounds = wx.GetClientDisplayRect()
+            pad = panel.FromDIP(32)
+            max_w = max(panel.FromDIP(350), bounds.width - pad)
+            max_h = max(panel.FromDIP(280), bounds.height - pad)
+            preferred_w = grid_sizer.CalcMin().width + panel.FromDIP(36)
+            preferred_h = grid_sizer.CalcMin().height + panel.FromDIP(150)
+            size = wx.Size(min(max_w, max(panel.FromDIP(540), preferred_w)),
+                           min(max_h, max(panel.FromDIP(310), preferred_h)))
+            panel.SetClientSize(size)
+            panel.Layout()
+            scroll_panel.FitInside()
+            panel.Centre()
 
-        main_sizer.Add(grid_sizer, 0, wx.ALL, 5)
+        def select_best(evt):
+            for ench_id in visible_ids:
+                cb = enchant_checkboxes[ench_id]
+                cb.SetValue(True)
+                ctrl = level_inputs[cb.GetId()]
+                ctrl.SetValue(str(max_levels.get(ench_id, 1)))
+                ctrl.Enable(True)
 
-        # Finalize panel setup
-        panel.SetSizer(main_sizer)
-        panel.Centre()
-        panel.Fit()
+        def unselect(evt):
+            for ench_id in visible_ids:
+                cb = enchant_checkboxes[ench_id]
+                cb.SetValue(False)
+                ctrl = level_inputs[cb.GetId()]
+                ctrl.SetValue("0")
+                ctrl.Enable(False)
+
+        def save_data(evt):
+            # Retain every checkbox state across catalog mode changes.
+            # Validate selected levels before writing any item data.
+            selected_levels = {}
+            for ench_id in all_ids:
+                cb = enchant_checkboxes[ench_id]
+                if not cb.IsChecked():
+                    continue
+                level_input = level_inputs[cb.GetId()]
+                try:
+                    level = int(level_input.GetValue().strip())
+                except ValueError:
+                    level = 0
+                if not 1 <= level <= 32767:
+                    wx.MessageBox(
+                        f"Enter a whole-number level from 1 to 32767 for {enchantments[ench_id]}.",
+                        "Invalid Enchantment Level", wx.OK | wx.ICON_WARNING)
+                    level_input.SetFocus()
+                    return
+                selected_levels[ench_id] = level
+
+            # Preserve unknown enchantment IDs and unrelated enchantment NBT.
+            # An unchanged entry retains its original fields and ordering.
+            tag_list = ListTag()
+            written_ids = set()
+            for entry in source_enchants:
+                ench_id = entry['id'].py_int
+                if ench_id not in enchantments:
+                    tag_list.append(copy.deepcopy(entry))
+                elif ench_id in selected_levels and ench_id not in written_ids:
+                    preserved = copy.deepcopy(entry)
+                    if preserved['lvl'].py_int != selected_levels[ench_id]:
+                        preserved['lvl'] = ShortTag(selected_levels[ench_id])
+                    tag_list.append(preserved)
+                    written_ids.add(ench_id)
+            for ench_id in all_ids:
+                if ench_id in selected_levels and ench_id not in written_ids:
+                    tag_list.append(CompoundTag({
+                        'id': ShortTag(ench_id),
+                        'lvl': ShortTag(selected_levels[ench_id])
+                    }))
+
+            if not tag_list and not source_enchants and 'tag' not in current_nbt:
+                panel.Close()
+                return
+            tag = current_nbt.get('tag')
+            if tag is None:
+                tag = CompoundTag({})
+                current_nbt['tag'] = tag
+            tag['Damage'] = IntTag(0)
+            tag['ench'] = tag_list
+            _self.editor.selected_player.save_player()
+            panel.Close()
+
+        best_button.Bind(EVT_BUTTON, select_best)
+        unselect_button.Bind(EVT_BUTTON, unselect)
+        save_button.Bind(EVT_BUTTON, save_data)
+        if mode_checkbox is not None:
+            mode_checkbox.Bind(EVT_CHECKBOX,
+                               lambda evt: update_choices(mode_checkbox.IsChecked()))
+        update_choices(show_all=not has_restricted_list)
         panel.Show()
 
     def open_container(self, event, item_name, editor, last_key):
@@ -6584,16 +6627,10 @@ class IconButton(wx.Panel):
                     container_item
                 )
 
-            if any(t in item_name for t in [
-                                               "pickaxe", "axe", "shovel", "hoe", "trident", "spear",
-                                               "helmet", "leggings", "chestplate", "boots",
-                                               "chainmail", "sword", "elytra", "mace", "brush", 'shield', 'bow',
-                                               "fishing_rod", "shears", "flint_and_steel",
-                                               "carrot_on_a_stick", "warped_fungus_on_a_stick",
-                                           ] + list(enchantments.values())):
-                enchant_item = wx.MenuItem(menu, wx.ID_ANY, "Edit Enchants")
-                menu.Append(enchant_item)
-                self.Bind(wx.EVT_MENU, lambda e, _self=self: self.tools.edit_enchants(_self), enchant_item)
+            # Every occupied item can use the enchantment editor.
+            enchant_item = wx.MenuItem(menu, wx.ID_ANY, "Edit Enchants")
+            menu.Append(enchant_item)
+            self.Bind(wx.EVT_MENU, lambda e, _self=self: self.tools.edit_enchants(_self), enchant_item)
 
             if any(t in item_name for t in [
                 "pickaxe", "axe", "shovel", "hoe", "trident", "spear",
