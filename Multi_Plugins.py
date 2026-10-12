@@ -50,6 +50,7 @@ from PIL import Image
 from amulet_map_editor.api.wx.ui.version_select import VersionSelect
 nbt_resources = image.nbt
 import json
+import hashlib
 from collections.abc import MutableMapping, MutableSequence
 import abc
 from amulet_nbt import *
@@ -2845,7 +2846,7 @@ class PlayersData:
                     current = current[key]
 
                 else:
-                    raise KeyError(f"Invalid key/index during traversal: {key}")
+                    raise KeyError(f"Invalid key / index during traversal: {key}")
             return current, keys[-1]
 
         def __getitem__(self, keys):
@@ -2874,7 +2875,7 @@ class PlayersData:
                                     pass
                             current = current[key]
                     else:
-                        raise KeyError(f"Invalid key/index: {key}")
+                        raise KeyError(f"Invalid key / index: {key}")
                 return current
 
         def __setitem__(self, keys, value):
@@ -2953,7 +2954,7 @@ class IconResources:
     def __init__(self):
         if not hasattr(self, '_initialized'):
             def get_resource_path(filename):
-                """Resolve a bundled/local resource without network access.
+                """Resolve a bundled / local resource without network access.
 
                 Amulet can load operation modules through import machinery whose
                 runtime ``__file__`` is not always the directory the user thinks
@@ -3244,10 +3245,10 @@ class IconResources:
     def _make_native_menu_bitmap(self, item_id, img):
         """Return a 32 x 32 bitmap safe for the native popup menu.
 
-        Most icons are converted directly. A tiny verified Deepslate family in
-        the historical atlas contains semi-transparent pixels *inside* otherwise
+        Most icons are converted directly. Some Deepslate item icons in
+        the item atlas contain semi-transparent pixels *inside* otherwise
         opaque geometry. On a white Windows menu those pixels blend toward white
-        and appear as missing/white streaks. For only those IDs, interior
+        and appear as pale streaks. For only those IDs, interior
         semi-transparent pixels are premultiplied against black and made opaque,
         while border antialiasing and true transparent background pixels are kept.
         """
@@ -3302,7 +3303,7 @@ class IconResources:
 
         The legacy atlas owns item metadata, ordering, menu pixels, and fallback.
         The optional high-resolution atlas is display-only and can never make an
-        otherwise missing legacy item appear in category/range logic.
+        otherwise missing legacy item appear in category / range logic.
         """
 
         def load_base64_imagefile(data):
@@ -3670,6 +3671,1253 @@ class IconResources:
         window.Show()
         window.Raise()
 
+_SELECTED_MACHINE_CONTAINERS = {
+    "dispenser": (9, frozenset(("Dispenser", "minecraft:dispenser"))),
+    "dropper": (9, frozenset(("Dropper", "minecraft:dropper",
+                                "Dispenser", "minecraft:dispenser"))),
+    "hopper": (5, frozenset(("Hopper", "minecraft:hopper"))),
+    "furnace": (3, frozenset(("Furnace", "minecraft:furnace"))),
+    "blast_furnace": (3, frozenset(("BlastFurnace", "minecraft:blast_furnace",
+                                      "Furnace", "minecraft:furnace"))),
+    "smoker": (3, frozenset(("Smoker", "minecraft:smoker",
+                              "Furnace", "minecraft:furnace"))),
+    "brewing_stand": (5, frozenset(("BrewingStand", "minecraft:brewing_stand"))),
+    "crafter": (9, frozenset(("Crafter", "minecraft:crafter"))),
+}
+
+
+_SELECTED_COPPER_CHESTS = frozenset((
+    "copper_chest", "exposed_copper_chest", "weathered_copper_chest",
+    "oxidized_copper_chest", "waxed_copper_chest",
+    "waxed_exposed_copper_chest", "waxed_weathered_copper_chest",
+    "waxed_oxidized_copper_chest",
+))
+
+
+def _new_selected_container_item(item_id, slot):
+    """Create the same basic item NBT fields used by the player inventory editor."""
+    if (type(slot) is not int or not 0 <= slot < 54
+            or not isinstance(item_id, str) or len(item_id) > 128
+            or not re.fullmatch(r"[a-z0-9_.-]+:[a-z0-9_./-]+", item_id)):
+        raise ValueError("Invalid Bedrock item identifier or container slot.")
+    item = CompoundTag({"Name": StringTag(item_id), "Damage": ShortTag(0),
+                        "Count": ByteTag(1), "Slot": ByteTag(slot),
+                        "tag": CompoundTag({})})
+    simple_name = item_id.split(":", 1)[1]
+    if any(category in simple_name for category in CONTAINERS):
+        if "bundle" in simple_name:
+            item["tag"]["storage_item_component_content"] = ListTag([
+                CompoundTag({"Name": StringTag(""), "Damage": ShortTag(0),
+                             "Count": ByteTag(0), "Slot": ByteTag(index),
+                             "tag": CompoundTag({})}) for index in range(64)
+            ])
+        else:
+            item["tag"]["Items"] = ListTag([])
+    if "boat" in simple_name or "minecart" in simple_name:
+        item.pop("tag", None)
+    return item
+
+
+def _selected_chest_family(name):
+    """Keep paired chest variants in the same block family."""
+    if name in ("chest", "trapped_chest"):
+        return name
+    if name in _SELECTED_COPPER_CHESTS:
+        return "copper_chest"
+    return None
+
+
+def _selected_pair_details(nbt):
+    """Read Bedrock chest pairing fields, refusing incomplete pair metadata."""
+    try:
+        x_tag, z_tag, lead_tag = (nbt[key] for key in ("pairx", "pairz", "pairlead"))
+        x, z, lead = (int(x_tag.py_int), int(z_tag.py_int), int(lead_tag.py_int))
+    except (KeyError, AttributeError, TypeError, ValueError) as error:
+        raise ValueError("The chest pairing metadata is incomplete or invalid.") from error
+    if lead not in (0, 1):
+        raise ValueError("The chest pairing lead value is invalid.")
+    return x, z, lead
+
+
+def _selected_container_items_by_slot(items, location, max_slots=27):
+    """Validate translated chest item slots without modifying their NBT."""
+    if items is not None and not isinstance(items, ListTag):
+        raise ValueError(f"The container at {location} has an invalid Items list.")
+    slots = {}
+    for item in items if items is not None else ():
+        if not isinstance(item, CompoundTag):
+            raise ValueError(f"The container at {location} contains invalid item data.")
+        slot_tag, name_tag, count_tag = (item.get("Slot"), item.get("Name"), item.get("Count"))
+        if slot_tag is None or name_tag is None or count_tag is None:
+            raise ValueError(f"The container at {location} has incomplete item data.")
+        try:
+            slot = int(slot_tag.py_int)
+            item_name = name_tag.py_str
+            count = int(count_tag.py_int)
+        except (AttributeError, TypeError, ValueError) as error:
+            raise ValueError(f"The container at {location} has invalid item tags.") from error
+        if not 0 <= slot < max_slots or slot in slots or not isinstance(item_name, str) or not 0 <= count <= 127:
+            raise ValueError(f"The container at {location} has invalid or duplicate item slots.")
+        slots[slot] = (item_name, count)
+    return slots
+
+
+def _selected_chest_pair_link(nbt, location, partner_location):
+    """Validate a chest half's optional link to one adjacent partner."""
+    keys = ("pairx", "pairz", "pairlead")
+    if not any(key in nbt for key in keys):
+        return None
+    pairx, pairz, lead = _selected_pair_details(nbt)
+    if (pairx, pairz) != (partner_location[0], partner_location[2]):
+        raise ValueError(f"The chest at {location} points to a different partner.")
+    return lead
+
+
+def _selected_chest_facing(block):
+    """Use the Bedrock facing state when it is available for pair validation."""
+    states = block.properties
+    for key in ("minecraft:cardinal_direction", "facing_direction",
+                "minecraft:facing_direction"):
+        if key in states:
+            tag = states[key]
+            return tag.py_str if hasattr(tag, "py_str") else (
+                tag.py_int if hasattr(tag, "py_int") else str(tag))
+    return None
+
+
+def _selected_native_chest_entity(world, location, dimension):
+    """Read the native Bedrock pairing tags, not translated Amulet pairing tags."""
+    cx, cz = block_coords_to_chunk_coords(location[0], location[2])
+    try:
+        data = world.level_wrapper.get_raw_chunk_data(cx, cz, dimension)
+    except (KeyError, ValueError, TypeError, OSError) as error:
+        raise ValueError(f"Cannot inspect native chest data at {location}.") from error
+    raw = data.get(b"1") if isinstance(data, dict) else None
+    if not isinstance(raw, bytes) or not raw:
+        raise ValueError(f"Native block-entity data is unavailable at {location}.")
+    if len(raw) > 16 * 1024 * 1024:
+        raise ValueError("The native block-entity record is too large to inspect.")
+    pointer, found, count = 0, [], 0
+    while pointer < len(raw):
+        count += 1
+        if count > 4096:
+            raise ValueError("Too many block entities in the selected chest chunk.")
+        context = ReadContext()
+        record = load(raw[pointer:], compressed=False, little_endian=True,
+                      read_context=context, string_decoder=utf8_escape_decoder)
+        length = context.offset
+        if not isinstance(length, int) or length <= 0 or pointer + length > len(raw):
+            raise ValueError("The selected chest chunk has an invalid block-entity record.")
+        root = record.compound
+        try:
+            pos = tuple(int(root[key].py_int) for key in ("x", "y", "z"))
+        except (KeyError, AttributeError, ValueError, TypeError) as error:
+            raise ValueError("A native block entity has invalid coordinates.") from error
+        if pos == location:
+            found.append(root)
+        pointer += length
+    if len(found) != 1:
+        raise ValueError(f"Expected one native block entity at {location}, found {len(found)}.")
+    ident = found[0].get("id")
+    if (not isinstance(ident, StringTag)
+            or ident.py_str not in ("Chest", "minecraft:chest",
+                                     "CopperChest", "minecraft:copper_chest")):
+        raise ValueError(f"The native block entity at {location} is not a supported chest.")
+    return found[0]
+
+
+def _inspect_selected_double_container(world, selected_location, dimension, name,
+                                       selected_entity, selected_pair=None):
+    """Resolve one physical double chest using native one-way pairing metadata."""
+    family = _selected_chest_family(name)
+    if family is None:
+        raise ValueError("This block cannot form a supported double chest.")
+    version = (world.level_wrapper.platform, world.level_wrapper.version)
+    selected_block, current_entity = world.get_version_block(
+        *selected_location, dimension, version)
+    if current_entity is None or current_entity.nbt != selected_entity.nbt:
+        raise ValueError("The selected chest changed during inspection.")
+    x, y, z = selected_location
+    neighbor_locations = ((x + 1, y, z), (x - 1, y, z),
+                          (x, y, z + 1), (x, y, z - 1))
+    # Selection is a precise physical hint, not proof of a stored pair.
+    if selected_pair is not None:
+        neighbor_locations = tuple(pos for pos in selected_pair if pos != selected_location)
+    selected_facing = _selected_chest_facing(selected_block)
+    if selected_pair is None and not any(
+            k in selected_entity.nbt.compound for k in ("pairx", "pairz", "pairlead")):
+        # Preserve the existing single-container path when no adjacent chest
+        # of the same family could be a partner.
+        possible = False
+        for nearby in neighbor_locations:
+            candidate, candidate_entity = world.get_version_block(
+                *nearby, dimension, version)
+            if (isinstance(candidate, Block)
+                    and candidate.namespace == "minecraft"
+                    and _selected_chest_family(candidate.base_name) == family
+                    and candidate_entity is not None):
+                possible = True
+                break
+        if not possible:
+            return None
+    selected_raw = _selected_native_chest_entity(world, selected_location, dimension)
+    matches = []
+    for other_location in neighbor_locations:
+        if (abs(other_location[0] - x) + abs(other_location[2] - z) != 1
+                or other_location[1] != y):
+            raise ValueError("The selected double chest blocks must be directly adjacent.")
+        other_block, other_entity = world.get_version_block(
+            *other_location, dimension, version)
+        other_name = (other_block.base_name if isinstance(other_block, Block)
+                      and other_block.namespace == "minecraft" else "")
+        if _selected_chest_family(other_name) != family or other_entity is None:
+            continue
+        other_facing = _selected_chest_facing(other_block)
+        if (selected_facing is not None and other_facing is not None
+                and selected_facing != other_facing):
+            continue
+        other_raw = _selected_native_chest_entity(world, other_location, dimension)
+        # Adjacent copper chests may belong to *different* pairs. A neighbor
+        # linking elsewhere is not evidence that this selected pair is malformed.
+        selected_link = None
+        other_link = None
+        if any(k in selected_raw for k in ("pairx", "pairz", "pairlead")):
+            px, pz, lead = _selected_pair_details(selected_raw)
+            if (px, pz) == (other_location[0], other_location[2]):
+                selected_link = lead
+        if any(k in other_raw for k in ("pairx", "pairz", "pairlead")):
+            px, pz, lead = _selected_pair_details(other_raw)
+            if (px, pz) == (selected_location[0], selected_location[2]):
+                other_link = lead
+        if selected_link is None and other_link is None:
+            continue
+        if (selected_link is not None and other_link is not None
+                and selected_link == other_link):
+            raise ValueError("The two marked chest halves have inconsistent lead values.")
+        if (any(k in root for root in (selected_raw, other_raw)
+                for k in ("LootTable", "LootTableSeed"))
+                or any(int(root["forceunpair"].py_int) != 0
+                       for root in (selected_raw, other_raw)
+                       if "forceunpair" in root)):
+            raise ValueError("Paired chests with loot tables or active force-unpair data are not supported.")
+        first = (selected_location, name, selected_block, selected_entity, selected_link)
+        second = (other_location, other_name, other_block, other_entity, other_link)
+        # The lead half occupies the first 27 slots of the staged inventory.
+        order = ((first, second) if selected_link == 1 or other_link == 0
+                 else (second, first))
+        matches.append(order)
+    if len(matches) != 1:
+        if selected_pair is not None:
+            raise ValueError("The two selected chest blocks have no verified native pairing link.")
+        if matches:
+            raise ValueError("Multiple adjacent chest links are ambiguous.")
+        # Absence of a native link allows an ordinary standalone chest.
+        if any(k in selected_raw for k in ("pairx", "pairz", "pairlead")):
+            try:
+                px, pz, _ = _selected_pair_details(selected_raw)
+            except ValueError as error:
+                raise ValueError("The selected chest has incomplete native pairing data.") from error
+            raise ValueError(
+                f"The native chest at {selected_location} links to ({px}, {y}, {pz}), "
+                "but no matching adjacent chest could be verified.")
+        return None
+    ordered = matches[0]
+    if selected_pair is not None and set(selected_pair) != {
+            ordered[0][0], ordered[1][0]}:
+        raise ValueError("The selection must contain exactly both paired chest blocks.")
+    slots = {}
+    combined = ListTag([])
+    halves = []
+    chunks = set()
+    for half_index, (location, block_name, block, entity, native_lead) in enumerate(ordered):
+        nbt = entity.nbt.compound
+        half_slots = _selected_container_items_by_slot(nbt.get("Items"), location)
+        for slot, item in half_slots.items():
+            slots[half_index * 27 + slot] = item
+        for item in nbt.get("Items", ()):
+            staged = copy.deepcopy(item)
+            staged["Slot"] = ByteTag(half_index * 27 + item["Slot"].py_int)
+            combined.append(staged)
+        halves.append({"location": location, "block_name": block_name,
+                       "original_block": str(block), "original_nbt": copy.deepcopy(entity.nbt),
+                       "native_pair_lead": native_lead, "slots": half_slots})
+        chunks.add(block_coords_to_chunk_coords(location[0], location[2]))
+    raw = None
+    cross_chunk_raw = None
+    if dimension == "minecraft:overworld":
+        # Pin every affected record before editing. A paired chest crossing
+        # a chunk boundary requires an atomic two-record database update.
+        original_records = {}
+        try:
+            for cx, cz in chunks:
+                chunk_data = world.level_wrapper.get_raw_chunk_data(cx, cz, dimension)
+                if not isinstance(chunk_data, dict) or not isinstance(chunk_data.get(b"1"), bytes):
+                    original_records = {}
+                    break
+                original_records[(cx, cz)] = chunk_data[b"1"]
+        except (KeyError, ValueError, TypeError, OSError):
+            original_records = {}
+        if len(original_records) == 1 and len(chunks) == 1:
+            raw = next(iter(original_records.values()))
+        elif len(original_records) == 2 and len(chunks) == 2:
+            cross_chunk_raw = original_records
+    return {"is_double": True, "slot_count": 54,
+            "original_raw_block_entities": raw,
+            "original_raw_block_entities_by_chunk": cross_chunk_raw,
+            "paired_cross_chunk": len(chunks) == 2,
+            "location": selected_location, "dimension": dimension,
+            "block_name": name, "slots": slots,
+            "missing_items": False, "has_loot_table": False,
+            "original_block": str(selected_block),
+            "original_nbt": copy.deepcopy(selected_entity.nbt),
+            "inventory_nbt": NamedTag(CompoundTag({"Items": combined})),
+            "double_halves": halves}
+
+
+
+
+
+
+def _selected_container_items_with_updates(source, changes):
+    """Apply staged slot edits to an NBT list without changing unrelated items."""
+    by_slot = {item["Slot"].py_int: copy.deepcopy(item) for item in source}
+    for slot, item in changes.items():
+        if item is None:
+            by_slot.pop(slot, None)
+        else:
+            by_slot[slot] = copy.deepcopy(item)
+    return ListTag([by_slot[slot] for slot in sorted(by_slot)])
+
+
+
+
+
+
+
+
+def _selected_container_sync_amulet_cache(world, snapshot):
+    """Mirror a verified LevelDB inventory into Amulet without replacing other edits."""
+    wrapper = world.level_wrapper
+    if wrapper.platform != "bedrock" or snapshot["dimension"] != "minecraft:overworld":
+        raise ValueError("Cache synchronization requires a saved Bedrock Overworld container.")
+    dimension = snapshot["dimension"]
+    if snapshot.get("is_double"):
+        halves = snapshot["double_halves"]
+        if len(halves) != 2 or any("saved_preview_nbt" not in half for half in halves):
+            raise ValueError("Both verified chest inventories must be available.")
+        targets = [(half["location"], half["block_name"], half["original_block"],
+                    half["original_nbt"], half["saved_preview_nbt"]) for half in halves]
+        records = (snapshot.get("original_raw_block_entities_by_chunk")
+                   if snapshot.get("paired_cross_chunk") else None)
+    else:
+        if "saved_preview_nbt" not in snapshot:
+            raise ValueError("Save the container to LevelDB before synchronization.")
+        targets = [(snapshot["location"], snapshot["block_name"],
+                    snapshot["original_block"], snapshot["original_nbt"],
+                    snapshot["saved_preview_nbt"])]
+        records = None
+
+    coords = {block_coords_to_chunk_coords(pos[0], pos[2]) for pos, *_ in targets}
+    if records is None:
+        pinned = snapshot.get("original_raw_block_entities")
+        if len(coords) != 1 or not isinstance(pinned, bytes) or not pinned:
+            raise ValueError("The verified container chunk record is unavailable.")
+        records = {next(iter(coords)): pinned}
+    if set(records) != coords:
+        raise ValueError("The saved container chunk records are incomplete.")
+
+    # The disk writer has already succeeded. These checks affect only the
+    # optional cache mirror; they must never reverse the primary Save result.
+    db = wrapper.level_db
+    for cx, cz in sorted(coords):
+        key = struct.pack("<ii", cx, cz) + b"\x31"
+        if not isinstance(records[(cx, cz)], bytes) or db.get(key) != records[(cx, cz)]:
+            raise ValueError("LevelDB changed before the optional Amulet synchronization.")
+
+    version = ("bedrock", wrapper.version)
+    previous_views = snapshot.get("_synced_nbt_by_location", {})
+    prepared = []
+    for pos, name, block_identity, original, desired in targets:
+        block, entity = world.get_version_block(*pos, dimension, version)
+        if (not isinstance(block, Block) or entity is None
+                or block.namespace != "minecraft" or block.base_name != name
+                or str(block) != block_identity
+                or type(entity.nbt) is not type(desired)):
+            raise ValueError("Amulet's loaded block does not match the saved container.")
+        baseline = previous_views.get(pos, original)
+        if type(baseline) is not type(entity.nbt):
+            raise ValueError("The saved Amulet container baseline is incompatible.")
+        cached_tags = entity.nbt.compound
+        baseline_tags = baseline.compound
+        # Do not synchronize across a locally changed chest pair or loot state.
+        # Other tags, including furnace progress, remain owned by Amulet.
+        for tag_name in ("pairx", "pairz", "pairlead", "forceunpair",
+                         "LootTable", "LootTableSeed"):
+            cached = cached_tags.get(tag_name)
+            expected = baseline_tags.get(tag_name)
+            if (cached is None) != (expected is None) or (
+                    cached is not None and expected is not None
+                    and (type(cached) is not type(expected) or cached != expected)):
+                raise ValueError("Amulet changed the container's structural metadata.")
+        current_items = cached_tags.get("Items", ListTag([]))
+        baseline_items = baseline_tags.get("Items", ListTag([]))
+        saved_items = desired.compound.get("Items", ListTag([]))
+        if not all(isinstance(tags, ListTag) for tags in
+                   (current_items, baseline_items, saved_items)):
+            raise ValueError("Amulet's container inventory is not an NBT item list.")
+        if current_items != baseline_items and current_items != saved_items:
+            raise ValueError("Amulet changed the loaded inventory independently. "
+                             "Direct LevelDB Save succeeded, but synchronization was skipped.")
+        updated = copy.deepcopy(entity)
+        updated.nbt.compound["Items"] = copy.deepcopy(saved_items)
+        prepared.append((pos, block, entity, updated))
+
+    # Preflight all halves first; if one cannot be mirrored, modify neither.
+    applied = []
+    try:
+        for pos, block, original_entity, updated_entity in prepared:
+            if original_entity.nbt != updated_entity.nbt:
+                world.set_version_block(*pos, dimension, version, block, updated_entity)
+                applied.append((pos, block, original_entity, updated_entity))
+            _, cached = world.get_version_block(*pos, dimension, version)
+            if (cached is None or type(cached.nbt) is not type(updated_entity.nbt)
+                    or cached.nbt != updated_entity.nbt):
+                raise RuntimeError("Amulet did not retain the synchronized container inventory.")
+        for cx, cz in sorted(coords):
+            world.get_chunk(cx, cz, dimension).changed = True
+            key = struct.pack("<ii", cx, cz) + b"\x31"
+            if db.get(key) != records[(cx, cz)]:
+                raise RuntimeError("LevelDB changed during Amulet synchronization.")
+    except Exception:
+        # Restore only a cache value that is still exactly the value we wrote.
+        # Never discard a concurrently changed Amulet block entity.
+        for pos, block, original_entity, updated_entity in reversed(applied):
+            try:
+                current_block, current_entity = world.get_version_block(
+                    *pos, dimension, version)
+                if (str(current_block) == str(block) and current_entity is not None
+                        and type(current_entity.nbt) is type(updated_entity.nbt)
+                        and current_entity.nbt == updated_entity.nbt):
+                    world.set_version_block(*pos, dimension, version,
+                                            block, original_entity)
+            except Exception:
+                pass
+        raise
+
+    snapshot["_synced_nbt_by_location"] = {
+        pos: copy.deepcopy(updated_entity.nbt)
+        for pos, _, _, updated_entity in prepared}
+    return "updated" if applied else "already current"
+
+
+
+def _selected_container_accept_verified_save(world, snapshot, updates):
+    """Advance the trusted disk baseline after the direct writer verifies its write."""
+    wrapper = world.level_wrapper
+    db = wrapper.level_db
+    if snapshot.get("is_double"):
+        halves = snapshot["double_halves"]
+        coords = [block_coords_to_chunk_coords(half["location"][0], half["location"][2])
+                  for half in halves]
+    else:
+        pos = snapshot["location"]
+        coords = [block_coords_to_chunk_coords(pos[0], pos[2])]
+    current = {}
+    for cx, cz in set(coords):
+        key = struct.pack("<ii", cx, cz) + b"\x31"
+        result = db.get(key)
+        if not isinstance(result, bytes) or not result:
+            raise RuntimeError("The saved container record could not be read back.")
+        current[(cx, cz)] = result
+
+    if snapshot.get("is_double"):
+        if snapshot.get("paired_cross_chunk"):
+            original = snapshot["original_raw_block_entities_by_chunk"]
+            if set(current) != set(original):
+                raise RuntimeError("The paired container chunk baseline is inconsistent.")
+        base = snapshot["inventory_nbt"]
+        staged = _selected_container_items_with_updates(base.compound.get("Items", ()), updates)
+        new_inventory = copy.deepcopy(base)
+        new_inventory.compound["Items"] = staged
+        updated_halves = []
+        for index, half in enumerate(snapshot["double_halves"]):
+            original_half = half.get("saved_preview_nbt", half["original_nbt"])
+            half_changes = {}
+            for slot, item in updates.items():
+                if slot // 27 == index:
+                    local_slot = slot % 27
+                    local_item = copy.deepcopy(item)
+                    if local_item is not None:
+                        local_item["Slot"] = ByteTag(local_slot)
+                    half_changes[local_slot] = local_item
+            revised_half = copy.deepcopy(original_half)
+            revised_half.compound["Items"] = _selected_container_items_with_updates(
+                original_half.compound.get("Items", ()), half_changes)
+            updated_halves.append(revised_half)
+        # Validate all new inventory slots before modifying the snapshot.
+        new_slots = _selected_container_items_by_slot(staged, snapshot["location"], 54)
+        half_slots = [_selected_container_items_by_slot(h.compound.get("Items", ()),
+                                                  half["location"])
+                      for h, half in zip(updated_halves, halves)]
+        if snapshot.get("paired_cross_chunk"):
+            snapshot["original_raw_block_entities_by_chunk"] = current
+        else:
+            snapshot["original_raw_block_entities"] = current[coords[0]]
+        snapshot["inventory_nbt"] = new_inventory
+        snapshot["slots"] = new_slots
+        for half, new_tag, slots in zip(halves, updated_halves, half_slots):
+            half["saved_preview_nbt"] = new_tag
+            half["slots"] = slots
+        return staged
+
+    old_view = snapshot.get("saved_preview_nbt", snapshot["original_nbt"])
+    revised = copy.deepcopy(old_view)
+    staged = _selected_container_items_with_updates(old_view.compound.get("Items", ()), updates)
+    revised.compound["Items"] = staged
+    slots = _selected_container_items_by_slot(staged, snapshot["location"],
+                                              snapshot.get("slot_count", 27))
+    snapshot["original_raw_block_entities"] = current[coords[0]]
+    snapshot["saved_preview_nbt"] = revised
+    snapshot["slots"] = slots
+    return staged
+
+
+
+def _save_selected_container_items_direct(world, snapshot, updates):
+    """Persist selected single-container slot changes in one verified Bedrock record."""
+    if snapshot.get("is_double"):
+        return _save_selected_double_container_items_direct(world, snapshot, updates)
+    wrapper = world.level_wrapper
+    if os.path.lexists(_selected_cross_chunk_recovery_path(world)):
+        raise ValueError("A pending chest recovery record must be resolved before direct saving.")
+    name = snapshot["block_name"]
+    supported = (name in ("chest", "trapped_chest", "barrel", "shulker_box")
+                 or name.endswith("_shulker_box")
+                 or name in _SELECTED_COPPER_CHESTS
+                 or name in _SELECTED_MACHINE_CONTAINERS)
+    if wrapper.platform != "bedrock" or not supported:
+        raise ValueError("Direct saving requires a supported Bedrock single container.")
+    if snapshot["dimension"] != "minecraft:overworld":
+        raise ValueError("Direct saving supports the Overworld only.")
+    if snapshot["has_loot_table"]:
+        raise ValueError("Unresolved loot-table containers cannot be edited.")
+    capacity = snapshot.get("slot_count", 27)
+    if not isinstance(updates, dict) or not 1 <= len(updates) <= capacity:
+        raise ValueError("Choose one or more inventory slot changes before saving.")
+    for slot, item in updates.items():
+        if type(slot) is not int or not 0 <= slot < capacity:
+            raise ValueError("An edited slot is outside the container inventory.")
+        if item is None:
+            if slot not in snapshot["slots"]:
+                raise ValueError("There is no item to remove from that slot.")
+            continue
+        if not isinstance(item, CompoundTag):
+            raise ValueError("Edited inventory data is not an NBT item compound.")
+        slot_tag, name_tag, count_tag = (item.get("Slot"), item.get("Name"), item.get("Count"))
+        if (not isinstance(slot_tag, ByteTag) or slot_tag.py_int != slot
+                or not isinstance(name_tag, StringTag)
+                or not isinstance(count_tag, ByteTag)
+                or not 1 <= count_tag.py_int <= 64
+                or len(name_tag.py_str) > 128
+                or not re.fullmatch(r"[a-z0-9_.-]+:[a-z0-9_./-]+", name_tag.py_str)):
+            raise ValueError(f"Slot {slot} has unsupported item identification or count data.")
+    original_raw = snapshot.get("original_raw_block_entities")
+    if not isinstance(original_raw, bytes) or not original_raw:
+        raise ValueError("The selected container did not have a readable raw block-entity record.")
+    location = snapshot["location"]
+    cx, cz = block_coords_to_chunk_coords(location[0], location[2])
+    # The pinned native LevelDB record, not Amulet's dirty cache, is the
+    # authority for the direct Save. Cache conflicts are reported by sync.
+    chunk_key = struct.pack("<ii", cx, cz) + b"\x31"
+    db = wrapper.level_db
+    try:
+        original_on_disk = db.get(chunk_key)
+    except KeyError as error:
+        raise ValueError("The container block-entity record is absent from LevelDB.") from error
+    if original_on_disk != original_raw:
+        raise ValueError("The underlying world record changed since this editor opened.")
+    if len(original_raw) > 16 * 1024 * 1024:
+        raise ValueError("The block-entity record exceeds the direct-editing size limit.")
+    pointer, segments, matching = 0, [], []
+    while pointer < len(original_raw):
+        if len(segments) >= 4096:
+            raise ValueError("Too many block entities in this chunk for direct editing.")
+        read_context = ReadContext()
+        record = load(original_raw[pointer:], compressed=False, little_endian=True,
+                      read_context=read_context, string_decoder=utf8_escape_decoder)
+        length = read_context.offset
+        if not isinstance(length, int) or length <= 0 or pointer + length > len(original_raw):
+            raise ValueError("Invalid block-entity NBT record length.")
+        root = record.compound
+        try:
+            coordinates = tuple(int(root[key].py_int) for key in ("x", "y", "z"))
+        except (KeyError, AttributeError, TypeError, ValueError) as error:
+            raise ValueError("A block entity has invalid coordinates; nothing was written.") from error
+        if coordinates == location:
+            matching.append(len(segments))
+        segments.append((record, original_raw[pointer:pointer + length]))
+        pointer += length
+    if len(matching) != 1:
+        raise ValueError("Expected exactly one block entity at the selected coordinates.")
+    target = matching[0]
+    record, original_record = segments[target]
+    root = record.compound
+    ident = root.get("id")
+    # Amulet can translate Bedrock block-entity IDs (for example Chest versus
+    # minecraft:chest). Validate the native ID against the selected block type,
+    # while the exact original raw record and translated block snapshot remain pinned.
+    native_ids = (_SELECTED_MACHINE_CONTAINERS[name][1]
+                  if name in _SELECTED_MACHINE_CONTAINERS else
+                  {"Chest", "minecraft:chest"} if name in ("chest", "trapped_chest") else
+                  {"Barrel", "minecraft:barrel"} if name == "barrel" else
+                  {"ShulkerBox", "minecraft:shulker_box"}
+                  if name == "shulker_box" or name.endswith("_shulker_box") else
+                  {"Chest", "minecraft:chest", "CopperChest", "minecraft:copper_chest"})
+    if not isinstance(ident, StringTag) or ident.py_str not in native_ids:
+        raise ValueError("The raw block-entity type is incompatible with the selected container.")
+    if any(field in root for field in ("pairx", "pairz", "pairlead", "LootTable", "LootTableSeed")):
+        raise ValueError("Paired and unresolved loot-table containers cannot be edited.")
+    items = root.get("Items")
+    if items is not None and not isinstance(items, ListTag):
+        raise ValueError("The raw container Items tag is not a list.")
+    raw_slots = {}
+    for index, item in enumerate(items if items is not None else ()):
+        if (not isinstance(item, CompoundTag) or not isinstance(item.get("Slot"), ByteTag)
+                or not isinstance(item.get("Name"), StringTag)
+                or not isinstance(item.get("Count"), ByteTag)):
+            raise ValueError("The raw container inventory has an unsupported item record.")
+        slot = item["Slot"].py_int
+        if slot in raw_slots or not 0 <= slot < capacity:
+            raise ValueError("The raw container has duplicate or invalid item slots.")
+        raw_slots[slot] = (item["Name"].py_str, item["Count"].py_int, index)
+    # Names may be translated by Amulet when it builds the preview. The pinned
+    # raw LevelDB record is authoritative; require matching occupied slots and
+    # counts without requiring raw item IDs to equal their translated aliases.
+    if (set(raw_slots) != set(snapshot["slots"])
+            or any(raw_slots[slot][1] != snapshot["slots"][slot][1]
+                   for slot in raw_slots)):
+        raise ValueError("Raw and preview slot occupancy or counts disagree. Reopen the world.")
+    if record.save_to(compressed=False, little_endian=True,
+                      string_encoder=utf8_escape_encoder) != original_record:
+        raise ValueError("This container cannot be serialized without changing unrelated data.")
+    updated_record = copy.deepcopy(record)
+    source_items = updated_record.compound.get("Items", ListTag([]))
+    preview_items = snapshot.get("saved_preview_nbt", snapshot["original_nbt"]).compound.get("Items", ())
+    preview_by_slot = {item["Slot"].py_int: item for item in preview_items}
+    changed_items = []
+    for item in source_items:
+        slot = item["Slot"].py_int
+        if slot in updates:
+            replacement = updates[slot]
+            if replacement is not None:
+                # A count-only edit must preserve the original raw item NBT,
+                # even when Amulet's translated preview normalizes other tags.
+                preview_original = preview_by_slot.get(slot)
+                if preview_original is not None:
+                    expected = copy.deepcopy(preview_original)
+                    expected["Count"] = ByteTag(replacement["Count"].py_int)
+                    if replacement == expected:
+                        preserved = copy.deepcopy(item)
+                        preserved["Count"] = ByteTag(replacement["Count"].py_int)
+                        replacement = preserved
+                changed_items.append(copy.deepcopy(replacement))
+        else:
+            changed_items.append(item)
+    for slot, replacement in sorted(updates.items()):
+        if slot not in raw_slots and replacement is not None:
+            changed_items.append(copy.deepcopy(replacement))
+    updated_record.compound["Items"] = ListTag(changed_items)
+    edited_bytes = updated_record.save_to(compressed=False, little_endian=True,
+                                          string_encoder=utf8_escape_encoder)
+    read_context = ReadContext()
+    decoded = load(edited_bytes, compressed=False, little_endian=True,
+                   read_context=read_context, string_decoder=utf8_escape_decoder)
+    if read_context.offset != len(edited_bytes) or decoded != updated_record:
+        raise ValueError("The updated container NBT failed serialization verification.")
+    updated_raw = b"".join(edited_bytes if index == target else raw
+                           for index, (_, raw) in enumerate(segments))
+    if db.get(chunk_key) != original_raw:
+        raise ValueError("The selected chunk changed during preparation. No write was made.")
+    db.put(chunk_key, updated_raw)
+    if db.get(chunk_key) != updated_raw:
+        raise RuntimeError("The direct LevelDB write could not be verified. Inspect the backup before continuing.")
+    print(f"Selected container direct save: {name} at {location}, "
+          f"{len(updates)} slots changed; LevelDB record verified.")
+    return len(updates)
+
+
+
+def _save_selected_double_container_items_direct(world, snapshot, updates):
+    """Save both adjacent chest inventories through one verified chunk record."""
+    wrapper = world.level_wrapper
+    halves = snapshot["double_halves"]
+    dimension = snapshot["dimension"]
+    if wrapper.platform != "bedrock" or dimension != "minecraft:overworld" or len(halves) != 2:
+        raise ValueError("Double chest saving requires a supported Bedrock Overworld pair.")
+    if snapshot.get("paired_cross_chunk"):
+        return _save_selected_double_container_cross_chunk(world, snapshot, updates)
+    if not isinstance(updates, dict) or not 1 <= len(updates) <= 54:
+        raise ValueError("Choose one or more edited double chest slots before saving.")
+    for slot, replacement in updates.items():
+        if type(slot) is not int or not 0 <= slot < 54:
+            raise ValueError("A double chest slot is outside its 54-slot inventory.")
+        if replacement is None:
+            if slot not in snapshot["slots"]:
+                raise ValueError("There is no item to remove from that double chest slot.")
+        elif (not isinstance(replacement, CompoundTag)
+              or not isinstance(replacement.get("Slot"), ByteTag)
+              or replacement["Slot"].py_int != slot
+              or not isinstance(replacement.get("Name"), StringTag)
+              or not isinstance(replacement.get("Count"), ByteTag)
+              or not 1 <= replacement["Count"].py_int <= 64
+              or not re.fullmatch(r"[a-z0-9_.-]+:[a-z0-9_./-]+", replacement["Name"].py_str)):
+            raise ValueError(f"Double chest slot {slot} has unsupported item data.")
+    positions = [part["location"] for part in halves]
+    coords = [block_coords_to_chunk_coords(pos[0], pos[2]) for pos in positions]
+    if coords[0] != coords[1]:
+        raise ValueError("This save path supports only double chests within one chunk.")
+    cx, cz = coords[0]
+    # Native pairing, slot data, and exact disk bytes are validated below.
+    original_raw = snapshot.get("original_raw_block_entities")
+    if not isinstance(original_raw, bytes) or not original_raw:
+        raise ValueError("The paired chest block-entity record is unavailable.")
+    db = wrapper.level_db
+    key = struct.pack("<ii", cx, cz) + b"\x31"
+    try:
+        disk_raw = db.get(key)
+    except KeyError as error:
+        raise ValueError("The double chest chunk record is missing from LevelDB.") from error
+    if disk_raw != original_raw:
+        raise ValueError("The double chest LevelDB record changed since preview.")
+    if len(original_raw) > 16 * 1024 * 1024:
+        raise ValueError("The double chest record is too large to edit safely.")
+    segments, pointer = [], 0
+    matches = {pos: [] for pos in positions}
+    while pointer < len(original_raw):
+        if len(segments) >= 4096:
+            raise ValueError("Too many block entities in the double chest chunk.")
+        context = ReadContext()
+        record = load(original_raw[pointer:], compressed=False, little_endian=True,
+                      read_context=context, string_decoder=utf8_escape_decoder)
+        length = context.offset
+        if not isinstance(length, int) or length <= 0 or pointer + length > len(original_raw):
+            raise ValueError("An invalid block entity prevents double chest editing.")
+        root = record.compound
+        try:
+            pos = tuple(int(root[name].py_int) for name in ("x", "y", "z"))
+        except (KeyError, AttributeError, TypeError, ValueError) as error:
+            raise ValueError("A raw block entity has invalid coordinates.") from error
+        if pos in matches:
+            matches[pos].append(len(segments))
+        segments.append((record, original_raw[pointer:pointer + length]))
+        pointer += length
+    if any(len(found) != 1 for found in matches.values()):
+        raise ValueError("Both chest halves must have exactly one raw block entity.")
+    replacements = {}
+    pair_links = []
+    for half_index, part in enumerate(halves):
+        position = part["location"]
+        segment_index = matches[position][0]
+        record, original_record = segments[segment_index]
+        root = record.compound
+        if _selected_chest_family(part["block_name"]) == "copper_chest":
+            legal_ids = {"Chest", "minecraft:chest", "CopperChest", "minecraft:copper_chest"}
+        else:
+            legal_ids = {"Chest", "minecraft:chest"}
+        ident = root.get("id")
+        if not isinstance(ident, StringTag) or ident.py_str not in legal_ids:
+            raise ValueError("A paired chest half has an incompatible raw block-entity type.")
+        other_pos = halves[1 - half_index]["location"]
+        raw_pair = _selected_chest_pair_link(root, position, other_pos)
+        if raw_pair != part["native_pair_lead"]:
+            raise ValueError("The native chest pairing changed since the editor was opened.")
+        if (half_index == 0 and raw_pair == 0
+                or half_index == 1 and raw_pair == 1):
+            raise ValueError("A double chest half has an inconsistent lead order.")
+        pair_links.append(raw_pair)
+        if (any(tag in root for tag in ("LootTable", "LootTableSeed"))
+                or ("forceunpair" in root and int(root["forceunpair"].py_int) != 0)):
+            raise ValueError("A paired chest half has unsupported loot or active unpair data.")
+        original_items = root.get("Items", ListTag([]))
+        half_slots = _selected_container_items_by_slot(original_items, position)
+        preview_slots = part["slots"]
+        if (set(half_slots) != set(preview_slots)
+                or any(half_slots[slot][1] != preview_slots[slot][1] for slot in half_slots)):
+            raise ValueError("A paired chest half's raw inventory differs from its preview.")
+        if record.save_to(compressed=False, little_endian=True,
+                          string_encoder=utf8_escape_encoder) != original_record:
+            raise ValueError("A paired chest half cannot be serialized without unrelated changes.")
+        half_updates = {}
+        for slot, item in updates.items():
+            if slot // 27 == half_index:
+                local_slot = slot % 27
+                replacement = copy.deepcopy(item)
+                if replacement is not None:
+                    replacement["Slot"] = ByteTag(local_slot)
+                half_updates[local_slot] = replacement
+        if not half_updates:
+            continue
+        translated_items = part.get("saved_preview_nbt", part["original_nbt"]).compound.get("Items", ())
+        preview_by_slot = {item["Slot"].py_int: item for item in translated_items}
+        new_record = copy.deepcopy(record)
+        new_items = []
+        for raw_item in new_record.compound.get("Items", ListTag([])):
+            local_slot = raw_item["Slot"].py_int
+            if local_slot not in half_updates:
+                new_items.append(raw_item)
+                continue
+            item = half_updates[local_slot]
+            if item is not None:
+                # Only the Count tag changes on raw NBT for count-only edits.
+                preview = preview_by_slot.get(local_slot)
+                if preview is not None:
+                    expected = copy.deepcopy(preview)
+                    expected["Count"] = ByteTag(item["Count"].py_int)
+                    if item == expected:
+                        requested_count = item["Count"].py_int
+                        item = copy.deepcopy(raw_item)
+                        item["Count"] = ByteTag(requested_count)
+                new_items.append(copy.deepcopy(item))
+        for local_slot, item in sorted(half_updates.items()):
+            if local_slot not in half_slots and item is not None:
+                new_items.append(copy.deepcopy(item))
+        new_record.compound["Items"] = ListTag(new_items)
+        edited_bytes = new_record.save_to(compressed=False, little_endian=True,
+                                          string_encoder=utf8_escape_encoder)
+        context = ReadContext()
+        verified = load(edited_bytes, compressed=False, little_endian=True,
+                        read_context=context, string_decoder=utf8_escape_decoder)
+        if context.offset != len(edited_bytes) or verified != new_record:
+            raise ValueError("The edited double chest NBT failed round-trip verification.")
+        replacements[segment_index] = edited_bytes
+    if not any(link is not None for link in pair_links):
+        raise ValueError("Neither raw chest half provides the required pairing link.")
+    if not replacements:
+        raise ValueError("The double chest inventory had no writable updates.")
+    updated_raw = b"".join(replacements.get(index, original) for index, (_, original) in enumerate(segments))
+    if db.get(key) != original_raw:
+        raise ValueError("The double chest changed during save preparation. No write was made.")
+    db.put(key, updated_raw)
+    if db.get(key) != updated_raw:
+        raise RuntimeError("The double chest LevelDB write could not be verified. Inspect your backup.")
+    print(f"Selected double chest direct save: {positions}, "
+          f"{len(updates)} slots changed; one LevelDB record verified.")
+    return len(updates)
+
+
+
+def _selected_cross_chunk_recovery_path(world):
+    """Locate the durable recovery record beside an opened Bedrock world."""
+    path = getattr(world.level_wrapper, "path", None)
+    if not isinstance(path, (str, os.PathLike)) or not os.path.isdir(path):
+        raise ValueError("The Bedrock world folder is unavailable for recovery protection.")
+    return os.path.join(os.fspath(path), ".multi_tools_chest_recovery.json")
+
+
+def _selected_cross_chunk_commit(world, keys, originals, updated):
+    """Commit verified chunk records with crash-recovery data when batching is absent."""
+    db = world.level_wrapper.level_db
+    if not updated or not set(updated).issubset(set(originals)) or set(keys) != set(originals):
+        raise ValueError("Invalid cross-chunk save records.")
+    for coord, raw in originals.items():
+        if not isinstance(raw, bytes) or not raw or not isinstance(keys[coord], bytes):
+            raise ValueError("Original chunk records or LevelDB keys are invalid.")
+        if db.get(keys[coord]) != raw:
+            raise ValueError("A double chest chunk changed before the direct save.")
+    for coord, raw in updated.items():
+        if not isinstance(raw, bytes) or not raw:
+            raise ValueError("The updated chunk record is invalid.")
+    path = _selected_cross_chunk_recovery_path(world)
+    if os.path.lexists(path):
+        raise ValueError("A pending chest recovery record exists at " + path +
+                         ". Resolve it on a backed-up world before another direct save.")
+    batch_write = getattr(db, "put_batch", None)
+    if callable(batch_write):
+        batch_write({keys[coord]: raw for coord, raw in updated.items()})
+        if any(db.get(keys[coord]) != raw for coord, raw in updated.items()):
+            raise RuntimeError("The atomic double chest write failed verification. Inspect the backup.")
+        return "atomic"
+    if len(updated) == 1:
+        coord, raw = next(iter(updated.items()))
+        if db.get(keys[coord]) != originals[coord]:
+            raise ValueError("The target chest half changed before writing.")
+        db.put(keys[coord], raw)
+        if db.get(keys[coord]) != raw:
+            raise RuntimeError("The single-chunk chest write failed verification. Inspect the backup.")
+        return "single"
+    if len(updated) != 2 or set(updated) != set(originals):
+        raise ValueError("A two-chunk save requires exactly two verified chunk records.")
+
+    # The recovery record survives a process crash between two non-atomic puts.
+    # Never overwrite an existing record or silently replay it on a loaded world.
+    entries = []
+    for coord in sorted(updated):
+        original, edited = originals[coord], updated[coord]
+        entries.append({
+            "chunk": list(coord), "key_hex": keys[coord].hex(),
+            "before": base64.b64encode(original).decode("ascii"),
+            "after": base64.b64encode(edited).decode("ascii"),
+            "before_sha256": hashlib.sha256(original).hexdigest(),
+            "after_sha256": hashlib.sha256(edited).hexdigest(),
+        })
+    data = json.dumps({"format": "multi_tools_cross_chunk_recovery_v1",
+                       "world_path": os.path.realpath(world.level_wrapper.path),
+                       "entries": entries}, separators=(",", ":")).encode("ascii")
+    handle = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    try:
+        with os.fdopen(handle, "wb") as file:
+            file.write(data)
+            file.flush()
+            os.fsync(file.fileno())
+    except BaseException:
+        # An incomplete journal is still a warning: leave it for inspection.
+        raise
+    try:
+        for coord in sorted(updated):
+            key = keys[coord]
+            if db.get(key) != originals[coord]:
+                raise RuntimeError("A chest chunk changed during sequential save.")
+            db.put(key, updated[coord])
+            if db.get(key) != updated[coord]:
+                raise RuntimeError("A chest chunk failed immediate write verification.")
+    except BaseException as error:
+        rollback_errors = []
+        for coord in reversed(sorted(updated)):
+            key = keys[coord]
+            try:
+                current = db.get(key)
+                if current == updated[coord]:
+                    db.put(key, originals[coord])
+                    if db.get(key) != originals[coord]:
+                        rollback_errors.append(str(coord))
+                elif current != originals[coord]:
+                    rollback_errors.append(str(coord))
+            except Exception:
+                rollback_errors.append(str(coord))
+        if not rollback_errors:
+            try:
+                os.unlink(path)
+            except OSError:
+                raise RuntimeError("Rollback verified, but its recovery file remains at " + path) from error
+            raise RuntimeError("Cross-chunk save failed; both original records were restored. "
+                               "No edits were retained.") from error
+        raise RuntimeError("Cross-chunk save incomplete. Recovery data retained at " + path +
+                           ". Do not save or reopen this world until it is inspected. "
+                           "Unrecovered chunks: " + ", ".join(rollback_errors)) from error
+    os.unlink(path)
+    return "sequential"
+
+
+def _save_selected_double_container_cross_chunk(world, snapshot, updates):
+    """Save a cross-chunk pair using verified records and recoverable writes."""
+    wrapper = world.level_wrapper
+    dimension = snapshot["dimension"]
+    halves = snapshot["double_halves"]
+    if (wrapper.platform != "bedrock" or dimension != "minecraft:overworld"
+            or not snapshot.get("is_double") or len(halves) != 2):
+        raise ValueError("Cross-chunk editing requires one supported Bedrock double chest.")
+    if not isinstance(updates, dict) or not 1 <= len(updates) <= 54:
+        raise ValueError("Choose one or more edited double chest slots before saving.")
+    for slot, item in updates.items():
+        if type(slot) is not int or not 0 <= slot < 54:
+            raise ValueError("An edited slot is outside the 54-slot inventory.")
+        if item is None:
+            if slot not in snapshot["slots"]:
+                raise ValueError(f"There is no item to remove from slot {slot}.")
+        elif (not isinstance(item, CompoundTag)
+              or not isinstance(item.get("Slot"), ByteTag)
+              or item["Slot"].py_int != slot
+              or not isinstance(item.get("Name"), StringTag)
+              or not isinstance(item.get("Count"), ByteTag)
+              or not 1 <= item["Count"].py_int <= 64
+              or not re.fullmatch(r"[a-z0-9_.-]+:[a-z0-9_./-]+", item["Name"].py_str)):
+            raise ValueError(f"Double chest slot {slot} has unsupported item data.")
+
+    positions = [half["location"] for half in halves]
+    coordinates = [block_coords_to_chunk_coords(pos[0], pos[2]) for pos in positions]
+    if coordinates[0] == coordinates[1]:
+        raise ValueError("The paired chest halves are not in different chunks.")
+    originals = snapshot.get("original_raw_block_entities_by_chunk")
+    if (not isinstance(originals, dict) or set(originals) != set(coordinates)
+            or any(not isinstance(value, bytes) or not value or len(value) > 16 * 1024 * 1024
+                   for value in originals.values())):
+        raise ValueError("Both original chest chunk records must be available for a batch save.")
+    db = wrapper.level_db
+    keys = {}
+    for cx, cz in coordinates:
+        key = struct.pack("<ii", cx, cz) + b"\x31"
+        pinned = originals[(cx, cz)]
+        try:
+            current = db.get(key)
+        except KeyError as error:
+            raise ValueError("A double chest chunk record is missing from LevelDB.") from error
+        if current != pinned:
+            raise ValueError("A chest LevelDB record changed since the editor was opened.")
+        keys[(cx, cz)] = key
+
+    updated = {}
+    links = []
+    for half_index, (cx, cz) in enumerate(coordinates):
+        location = positions[half_index]
+        half = halves[half_index]
+        pinned = originals[(cx, cz)]
+        pointer, segments, hits = 0, [], []
+        while pointer < len(pinned):
+            if len(segments) >= 4096:
+                raise ValueError("Too many block entities in a selected chest chunk.")
+            context = ReadContext()
+            record = load(pinned[pointer:], compressed=False, little_endian=True,
+                          read_context=context, string_decoder=utf8_escape_decoder)
+            length = context.offset
+            if not isinstance(length, int) or length <= 0 or pointer + length > len(pinned):
+                raise ValueError("A double chest chunk has invalid block-entity data.")
+            root = record.compound
+            try:
+                pos = tuple(int(root[tag].py_int) for tag in ("x", "y", "z"))
+            except (KeyError, AttributeError, TypeError, ValueError) as error:
+                raise ValueError("A raw block entity has invalid coordinates.") from error
+            if pos == location:
+                hits.append(len(segments))
+            segments.append((record, pinned[pointer:pointer + length]))
+            pointer += length
+        if len(hits) != 1:
+            raise ValueError("Each chest chunk must contain exactly one matching block entity.")
+        target = hits[0]
+        record, original_record = segments[target]
+        root = record.compound
+        legal_ids = ({"Chest", "minecraft:chest", "CopperChest", "minecraft:copper_chest"}
+                     if _selected_chest_family(half["block_name"]) == "copper_chest"
+                     else {"Chest", "minecraft:chest"})
+        ident = root.get("id")
+        if not isinstance(ident, StringTag) or ident.py_str not in legal_ids:
+            raise ValueError("The native chest entity type is incompatible with the selected pair.")
+        raw_link = _selected_chest_pair_link(root, location, positions[1 - half_index])
+        if (raw_link != half["native_pair_lead"]
+                or (half_index == 0 and raw_link == 0)
+                or (half_index == 1 and raw_link == 1)):
+            raise ValueError("The paired chest NBT or lead order changed since inspection.")
+        links.append(raw_link)
+        if (any(tag in root for tag in ("LootTable", "LootTableSeed"))
+                or ("forceunpair" in root and int(root["forceunpair"].py_int) != 0)):
+            raise ValueError("Unresolved loot or force-unpair records cannot be edited.")
+        half_slots = _selected_container_items_by_slot(root.get("Items"), location)
+        preview_slots = half["slots"]
+        if (set(half_slots) != set(preview_slots)
+                or any(half_slots[slot][1] != preview_slots[slot][1] for slot in half_slots)):
+            raise ValueError("Raw chest occupancy or counts differ from the preview.")
+        if record.save_to(compressed=False, little_endian=True,
+                          string_encoder=utf8_escape_encoder) != original_record:
+            raise ValueError("A chest half cannot be serialized without unrelated changes.")
+        half_updates = {}
+        for slot, item in updates.items():
+            if slot // 27 == half_index:
+                local_slot = slot % 27
+                replacement = copy.deepcopy(item)
+                if replacement is not None:
+                    replacement["Slot"] = ByteTag(local_slot)
+                half_updates[local_slot] = replacement
+        if not half_updates:
+            continue
+        preview_by_slot = {item["Slot"].py_int: item for item in
+                           half.get("saved_preview_nbt", half["original_nbt"]).compound.get("Items", ())}
+        new_record = copy.deepcopy(record)
+        new_items = []
+        for raw_item in new_record.compound.get("Items", ListTag([])):
+            local_slot = raw_item["Slot"].py_int
+            if local_slot not in half_updates:
+                new_items.append(raw_item)
+                continue
+            item = half_updates[local_slot]
+            if item is not None:
+                preview = preview_by_slot.get(local_slot)
+                if preview is not None:
+                    expected = copy.deepcopy(preview)
+                    expected["Count"] = ByteTag(item["Count"].py_int)
+                    if item == expected:
+                        count = item["Count"].py_int
+                        item = copy.deepcopy(raw_item)
+                        item["Count"] = ByteTag(count)
+                new_items.append(copy.deepcopy(item))
+        for local_slot, item in sorted(half_updates.items()):
+            if local_slot not in half_slots and item is not None:
+                new_items.append(copy.deepcopy(item))
+        new_record.compound["Items"] = ListTag(new_items)
+        edited = new_record.save_to(compressed=False, little_endian=True,
+                                    string_encoder=utf8_escape_encoder)
+        context = ReadContext()
+        verified = load(edited, compressed=False, little_endian=True,
+                        read_context=context, string_decoder=utf8_escape_decoder)
+        if context.offset != len(edited) or verified != new_record:
+            raise ValueError("Edited double chest NBT failed round-trip verification.")
+        updated[(cx, cz)] = b"".join(edited if i == target else original
+                                       for i, (_, original) in enumerate(segments))
+    if not any(link is not None for link in links):
+        raise ValueError("Neither half contains a valid native pairing link.")
+    if not updated:
+        raise ValueError("The selected double chest has no writable updates.")
+    for coord in coordinates:
+        if db.get(keys[coord]) != originals[coord]:
+            raise ValueError("A double chest chunk changed during save preparation.")
+    mode = _selected_cross_chunk_commit(world, keys, originals, updated)
+    print(f"Selected double chest cross-chunk save ({mode}): {positions}, "
+          f"{len(updates)} slots changed across {len(updated)} chunk record(s).")
+    return len(updates)
+
+
+
+def _inspect_selected_container(world, canvas):
+    """Read one selected Bedrock container without modifying any world data."""
+    if world.level_wrapper.platform != "bedrock":
+        raise ValueError("Selected container preview currently supports Bedrock worlds only.")
+
+    boxes = tuple(canvas.selection.selection_group.selection_boxes)
+    if len(boxes) != 1:
+        raise ValueError("Select one chest block or one two-block chest pair.")
+    shape = tuple(int(v) for v in boxes[0].shape)
+    if shape not in ((1, 1, 1), (2, 1, 1), (1, 1, 2)):
+        raise ValueError("Select one container block or exactly two adjacent chest blocks.")
+    location = tuple(int(v) for v in boxes[0].min)
+    selected_pair = None
+    if shape != (1, 1, 1):
+        selected_pair = (location, (location[0] + (shape[0] - 1),
+                                    location[1], location[2] + (shape[2] - 1)))
+    dimension = canvas.dimension
+    version = (world.level_wrapper.platform, world.level_wrapper.version)
+    block, block_entity = world.get_version_block(*location, dimension, version)
+    name = block.base_name if isinstance(block, Block) and block.namespace == "minecraft" else ""
+    supported = (name in ("chest", "trapped_chest", "barrel", "shulker_box")
+                 or name.endswith("_shulker_box")
+                 or name in _SELECTED_COPPER_CHESTS
+                 or name in _SELECTED_MACHINE_CONTAINERS)
+    if not supported:
+        raise ValueError("Select a supported single container or a double chest.")
+    if block_entity is None:
+        raise ValueError("The selected container has no readable block entity.")
+
+    nbt = block_entity.nbt.compound
+    if _selected_chest_family(name) is not None:
+        double = _inspect_selected_double_container(
+            world, location, dimension, name, block_entity, selected_pair)
+        if double is not None:
+            return double
+    if selected_pair is not None:
+        raise ValueError("A two-block selection must contain a verified double chest pair.")
+    items = nbt.get("Items")
+    if items is not None and not isinstance(items, ListTag):
+        raise ValueError("The selected container has an invalid Items list.")
+
+    capacity = _SELECTED_MACHINE_CONTAINERS[name][0] if name in _SELECTED_MACHINE_CONTAINERS else 27
+    slots = _selected_container_items_by_slot(items, location, capacity)
+
+    # Pin the exact on-disk record to detect changes before direct-save tests.
+    original_raw = None
+    if dimension == "minecraft:overworld" and not any(
+            key in nbt for key in ("pairx", "pairz", "pairlead", "LootTable", "LootTableSeed")):
+        try:
+            cx, cz = block_coords_to_chunk_coords(location[0], location[2])
+            chunk_data = world.level_wrapper.get_raw_chunk_data(cx, cz, dimension)
+            if isinstance(chunk_data, dict) and isinstance(chunk_data.get(b"1"), bytes):
+                original_raw = chunk_data[b"1"]
+        except (KeyError, OSError, ValueError, TypeError):
+            pass
+
+    return {
+        "original_raw_block_entities": original_raw,
+        "is_double": False, "slot_count": capacity,
+        "location": location,
+        "dimension": dimension,
+        "block_name": name,
+        "slots": slots,
+        "missing_items": items is None,
+        "has_loot_table": any(key in nbt for key in ("LootTable", "LootTableSeed")),
+        "original_block": str(block),
+        "original_nbt": copy.deepcopy(block_entity.nbt),
+    }
+
+
+class ReadOnlyContainerSlot(wx.Panel):
+    """Show an unchanged container slot when direct editing is unavailable."""
+
+    def __init__(self, parent, editor, slot, item, resources):
+        super().__init__(parent)
+        self.SetBackgroundColour(wx.Colour(0, 0, 0))
+        edge = (92 if _ui_is_1440p_150(editor)
+                else _ui_metric_three(editor, 76, 104, 154))
+        item_name, count = item if item else ("", 0)
+        item_id = item_name.split(":", 1)[-1] if item_name else ""
+        display = resources.get(item_id, {}).get("display_name", item_id) if item else "Empty"
+        tooltip = (f"Slot {slot}: {display} ({item_name}) x{count}"
+                   if item else f"Slot {slot}: Empty")
+        vertical = wx.BoxSizer(wx.VERTICAL)
+        button = wx.Button(self, size=(edge, edge), name=item_id or "Empty")
+        button.SetBackgroundColour(wx.Colour(46, 46, 46))
+        button.SetForegroundColour(wx.Colour(255, 255, 255))
+        bitmap = resources.get_dpi_bitmap(item_id, button, logical_size=(
+            76 if _ui_is_1440p_150(editor) else 64)) if item_id else wx.NullBitmap
+        if bitmap and bitmap.IsOk():
+            button.SetBitmap(bitmap)
+        elif item_id:
+            button.SetLabel(item_id.replace("_", "_\n", 1))
+        button.SetToolTip(tooltip)
+        button.Disable()
+        vertical.Add(button, 0, wx.ALIGN_CENTER)
+        count_box = wx.TextCtrl(self, value=str(count),
+                                size=(_ui_metric(editor, 60, 82), -1),
+                                style=wx.TE_READONLY | wx.TE_CENTRE)
+        count_box.SetBackgroundColour(wx.Colour(0, 0, 0))
+        count_box.SetForegroundColour(wx.Colour(255, 255, 255))
+        count_box.SetToolTip(tooltip)
+        vertical.Add(count_box, 0, wx.ALIGN_CENTER | wx.TOP, _ui_metric(editor, 4, 6))
+        self.SetSizer(vertical)
+
+
+class SelectedContainerPreview(wx.Frame):
+    """Read-only fallback for containers without a supported direct-save record."""
+
+    def __init__(self, parent, snapshot):
+        x, y, z = snapshot["location"]
+        readable_name = ("Double Chest" if snapshot.get("is_double") else
+                         snapshot["block_name"].replace("_", " ").title())
+        super().__init__(parent, title=f"Selected {readable_name} Preview - {x}, {y}, {z}",
+                         style=_float_on_parent_style())
+        self.SetBackgroundColour(wx.Colour(0, 0, 0))
+        self.SetForegroundColour(wx.Colour(255, 255, 255))
+        pad = _ui_metric(self, 6, 12)
+        root = wx.BoxSizer(wx.VERTICAL)
+        self.SetSizer(root)
+        text = f"Read-only / {readable_name} / {snapshot['dimension']} / ({x}, {y}, {z})"
+        root.Add(wx.StaticText(self, label=text), 0, wx.ALL, pad)
+        if snapshot["has_loot_table"]:
+            root.Add(wx.StaticText(self, label="The stored loot table has not been resolved."),
+                     0, wx.LEFT | wx.RIGHT | wx.BOTTOM, pad)
+        viewport = wx.ScrolledWindow(self, style=wx.VSCROLL | wx.HSCROLL | wx.CLIP_CHILDREN)
+        viewport.SetBackgroundColour(wx.Colour(0, 0, 0))
+        capacity = snapshot.get("slot_count", 27)
+        columns = 9 if capacity >= 9 else max(1, capacity)
+        rows = (capacity + columns - 1) // columns
+        grid = wx.GridSizer(rows, columns, _ui_metric(self, 4, 10), _ui_metric(self, 4, 10))
+        resources = IconResources()
+        for slot in range(snapshot.get("slot_count", 27)):
+            grid.Add(ReadOnlyContainerSlot(viewport, self, slot,
+                     snapshot["slots"].get(slot), resources),
+                     0, wx.ALL | wx.ALIGN_CENTER, _ui_metric(self, 2, 4))
+        viewport.SetSizer(grid)
+        viewport.SetScrollRate(_ui_metric(self, 8, 12), _ui_metric(self, 8, 12))
+        viewport.FitInside()
+        root.Add(viewport, 1, wx.EXPAND | wx.LEFT | wx.RIGHT, pad)
+        close_button = wx.Button(self, label="Close")
+        close_button.Bind(wx.EVT_BUTTON, lambda event: self.Close())
+        root.Add(close_button, 0, wx.ALIGN_RIGHT | wx.ALL, pad)
+        self.Layout()
+        size = grid.GetMinSize()
+        self.SetClientSize(wx.Size(size.width + 4 * pad + _ui_metric(self, 16, 32),
+                                   size.height + 6 * pad + _ui_metric(self, 82, 118)))
+        self.CentreOnParent()
+        _clamp_window_to_display(self, 0.94, 0.90)
+        self.Show()
+        self.Raise()
+
+
 class InventoryEditor(wx.Frame):
     def _active_panel_drag_source(self):
         source = getattr(self, '_inventory_drag_source', None)
@@ -3808,14 +5056,15 @@ class InventoryEditor(wx.Frame):
                 max_w = int(display.width * 0.88)
                 max_h = int(display.height * 0.84)
 
-            # Keep the accepted 1080p / 100% and 4K / 225% layout unchanged.
+            # Preserve the calibrated layout at the supported display scales.
             # At 1440p / 150%, prefer a tighter frame while still fitting the
             # actual grid. Never force the client area below its content width.
             if _ui_is_1440p_150(self):
                 if self._main_inventory_ui:
                     pad_w, pad_h = 52, 58
                     min_w, min_h = 700, 540
-                elif "Ender" in self.GetTitle():
+                elif ("Ender" in self.GetTitle()
+                      or getattr(self, "container_snapshot", None) is not None):
                     pad_w, pad_h = 38, 49
                     min_w, min_h = 590, 440
 
@@ -3913,7 +5162,7 @@ class InventoryEditor(wx.Frame):
             key, slot = x.Get_slot_map_key()
             current_keys = self.keys + [key]
             current = self.selected_player[current_keys]
-            slot_id = slot  # save original slot value for clarity
+            slot_id = slot  # Keep the original slot identifier.
 
             # Find the item with the matching 'Slot'
             item_index = next(
@@ -3926,7 +5175,7 @@ class InventoryEditor(wx.Frame):
 
                 continue
 
-            #banner id patch
+            # Match banner colour identifiers when updating the inventory.
             colors = [key.lower() for key in list(custom_color_dict.keys())[1:]]
             item_name = current[item_index]['Name'].py_str
             if 'banner' in item_name:
@@ -3944,6 +5193,24 @@ class InventoryEditor(wx.Frame):
 
 
         self.selected_player.save_player()
+
+    def preview_selected_container(self, event):
+        try:
+            snapshot = _inspect_selected_container(self.parent.world, self.parent.canvas)
+        except ValueError as error:
+            wx.MessageBox(str(error), "Selected Container Preview", wx.OK | wx.ICON_INFORMATION, self)
+            return
+        except Exception as error:
+            wx.MessageBox(f"Could not read the selected container: {type(error).__name__}: {error}",
+                          "Selected Container Preview", wx.OK | wx.ICON_ERROR, self)
+            return
+        if (snapshot["dimension"] == "minecraft:overworld"
+                and not snapshot["has_loot_table"]
+                and (snapshot.get("original_raw_block_entities") is not None
+                     or snapshot.get("original_raw_block_entities_by_chunk") is not None)):
+            self._selected_container_preview = SelectedContainerInventoryEditor(self, snapshot)
+        else:
+            self._selected_container_preview = SelectedContainerPreview(self, snapshot)
 
     def ender_chest(self, event):
         self._ender_chest_editor = InventoryEditor(self, self.selected_player, [], title='Ender Chest')
@@ -4061,6 +5328,17 @@ class InventoryEditor(wx.Frame):
                     button.Bind(wx.EVT_BUTTON, self.ender_chest)
                     button.SetForegroundColour((0, 255, 0))
                     target_sizer.Add(button, 0, wx.TOP, _ui_metric(self, 4, 6))
+                elif i == 3 and main:
+                    icon = self.resources.get_scaled_cache.get('chest', wx.NullBitmap)
+                    button = IconButton(self.scroll_panel, 'chest', "Preview Selected Container", 2000, icon, -202, self)
+                    button.HideButtonValue()
+                    button.UnbindButtonMenu()
+                    button.SetName('SelectedChestButton')
+                    button.Bind(wx.EVT_BUTTON, self.preview_selected_container)
+                    button.SetToolTip("Preview a selected chest, copper chest, barrel, or shulker box")
+                    button.button.SetToolTip("Preview a selected chest, copper chest, barrel, or shulker box")
+                    button.SetForegroundColour((0, 255, 0))
+                    target_sizer.Add(button, 0, wx.TOP, _ui_metric(self, 4, 6))
                 else:
                     divider_line = wx.StaticLine(self.scroll_panel, style=wx.LI_HORIZONTAL)
                     target_sizer.Add(divider_line, 0, wx.TOP, _ui_metric(self, 4, 6))
@@ -4146,15 +5424,19 @@ class InventoryEditor(wx.Frame):
             self.grid_sizer.Add(hotbar_grid, 0, wx.ALIGN_CENTER | wx.LEFT | wx.RIGHT | wx.BOTTOM, outer_pad)
         else:
             CONTAINER_CONFIG = {
+                "Double Chest": {
+                    "grid": (7, 9),
+                    "key": "Items",
+                    "order": list(range(54)),
+                    "middle": 9,
+                },
                 "Bundle": {
-                    "size": (1400, -1),
                     "grid": (0, 16),  # 0 rows = auto, 16 columns
                     "key": "storage_item_component_content",
                     "order": list(range(64)),
                     "middle": 16,
                 },
                 "Ender": {
-                    "size": (805, 560),
                     "grid": (4, 9),
                     "key": "EnderChestInventory",
                     "order": list(range(27)),
@@ -4168,11 +5450,31 @@ class InventoryEditor(wx.Frame):
                     "middle": 9,
                 },
                 "Dispenser": {
-                    "size": (500, 555),
                     "grid": (4, 3),
                     "key": "Items",
                     "order": list(range(9)),
                     "middle": 3,
+                },
+                "Dropper": {
+                    "grid": (4, 3), "key": "Items", "order": list(range(9)), "middle": 3,
+                },
+                "Hopper": {
+                    "grid": (2, 5), "key": "Items", "order": list(range(5)), "middle": 5,
+                },
+                "Blast Furnace": {
+                    "grid": (2, 3), "key": "Items", "order": list(range(3)), "middle": 3,
+                },
+                "Furnace": {
+                    "grid": (2, 3), "key": "Items", "order": list(range(3)), "middle": 3,
+                },
+                "Smoker": {
+                    "grid": (2, 3), "key": "Items", "order": list(range(3)), "middle": 3,
+                },
+                "Brewing Stand": {
+                    "grid": (2, 5), "key": "Items", "order": list(range(5)), "middle": 5,
+                },
+                "Crafter": {
+                    "grid": (4, 3), "key": "Items", "order": list(range(9)), "middle": 3,
                 },
                 "Chest": {
                     # A single chest has 27 slots, arranged 3 rows x 9 columns
@@ -4196,13 +5498,14 @@ class InventoryEditor(wx.Frame):
                     # Let the content and display-aware fit pass determine frame size.
                     rows, cols = cfg["grid"]
                     container_gap = _ui_metric(self, 4, 10)
+                    # Use the same stretching grid as the Ender Chest editor.
                     self.grid_sizer = wx.GridSizer(rows, cols, container_gap, container_gap)
 
                     # Pick the NBT key and slot order
                     key = cfg["key"]
                     range_order = cfg["order"]
 
-                    # 4) Call the helper to center mid-row slots
+                    # Build the existing top-row control layout.
                     middle_slots(cfg["middle"], main=False)
                     break
             else:
@@ -4223,8 +5526,6 @@ class InventoryEditor(wx.Frame):
                 else:
                     count = item.get("Count", 0)
                     icon_bitmap = self.resources.get_scaled_cache.get(item_name)
-                    if icon_bitmap:
-                        icon_bitmap = icon_bitmap
 
                 button = IconButton(
                     self.scroll_panel,
@@ -4246,6 +5547,160 @@ class InventoryEditor(wx.Frame):
         self.scroll_panel.Layout()
         self.Layout()
 
+class SelectedContainerStaging(PlayersData.Player):
+    """Adapt a selected block entity to the normal Inventory Editor's NBT paths."""
+
+    def __init__(self, snapshot, world):
+        original_items = snapshot.get("inventory_nbt", snapshot["original_nbt"]).compound.get("Items", ListTag([]))
+        source = CompoundTag({"Items": copy.deepcopy(original_items)})
+        super().__init__(source, "selected_container", world)
+
+    def save_player(self):
+        # Item tools reuse this hook. Only the container editor's Save button
+        # commits to the world, never the normal player's LevelDB record.
+        return None
+
+
+class SelectedContainerInventoryEditor(InventoryEditor):
+    """Use normal inventory controls with a selected block-entity save target."""
+
+    def __init__(self, parent, snapshot):
+        self.container_snapshot = snapshot
+        self.container_world = parent.parent.world
+        self._container_staging = SelectedContainerStaging(snapshot, self.container_world)
+        name = snapshot["block_name"].replace("_", " ").title()
+        if snapshot.get("is_double"):
+            name = "Double Chest"
+        kind = (name if snapshot["block_name"] in _SELECTED_MACHINE_CONTAINERS else
+                "Shulker Box" if "shulker_box" in snapshot["block_name"] else
+                "Barrel" if snapshot["block_name"] == "barrel" else "Chest")
+        x, y, z = snapshot["location"]
+        title = f"Selected {name} / {kind} / ({x}, {y}, {z})"
+        self._container_title = title
+        super().__init__(parent, self._container_staging, [], title=title)
+        # The regular inventory window supplies the controls and sizing.
+
+    def on_clear_all(self, event):
+        """Clear staged container slots using the normal inventory slot controls."""
+        self._container_staging.player_data["Items"] = ListTag([])
+        for slot in range(self.container_snapshot.get("slot_count", 27)):
+            control = self.slot_map.get(("Items", slot))
+            if control is not None:
+                control.delete_slot()
+        self.Refresh()
+
+    def _pending_container_slots(self):
+        """Collect regular IconButton changes without discarding unedited item NBT."""
+        staged = self._container_staging.player_data.get("Items")
+        if not isinstance(staged, ListTag):
+            raise ValueError("The staged container inventory is not an NBT item list.")
+        by_slot = {}
+        for item in staged:
+            if not isinstance(item, CompoundTag) or not isinstance(item.get("Slot"), ByteTag):
+                raise ValueError("The staged inventory contains an unsupported item entry.")
+            slot = item["Slot"].py_int
+            if not 0 <= slot < self.container_snapshot.get("slot_count", 27) or slot in by_slot:
+                raise ValueError("The staged inventory has duplicate or out-of-range slots.")
+            by_slot[slot] = item
+        original = {}
+        for item in self.container_snapshot.get("inventory_nbt",
+                  self.container_snapshot.get("saved_preview_nbt", self.container_snapshot["original_nbt"])).compound.get("Items", ()):
+            slot = item["Slot"].py_int
+            original[slot] = item
+        updates = {}
+        for slot in range(self.container_snapshot.get("slot_count", 27)):
+            control = self.slot_map.get(("Items", slot))
+            if control is None:
+                raise ValueError(f"Container slot {slot} is unavailable.")
+            visual_name = control.button.GetName()
+            count_text = control.count_box.GetValue().strip()
+            if visual_name == "Empty" or count_text == "0":
+                new_item = None
+            else:
+                if not count_text.isascii() or not count_text.isdecimal():
+                    raise ValueError(f"Slot {slot} requires a valid item count.")
+                count = int(count_text)
+                if not 1 <= count <= 64:
+                    raise ValueError(f"Slot {slot} requires a count from 1 to 64.")
+                current = by_slot.get(slot)
+                if current is None:
+                    # The native menu may update a bitmap before inserting NBT.
+                    if not isinstance(visual_name, str) or not visual_name:
+                        raise ValueError(f"Slot {slot} has no item data.")
+                    current = _new_selected_container_item("minecraft:" + visual_name, slot)
+                new_item = copy.deepcopy(current)
+                new_item["Count"] = ByteTag(count)
+            previous = original.get(slot)
+            if (new_item is None) != (previous is None) or (
+                    new_item is not None and previous is not None and new_item != previous):
+                updates[slot] = new_item
+        return updates
+
+    def save_button(self, event):
+        """Use the Inventory Editor's Save control for a direct container write."""
+        try:
+            updates = self._pending_container_slots()
+        except (ValueError, KeyError, AttributeError) as error:
+            wx.MessageBox(str(error), "Invalid Container Item", wx.OK | wx.ICON_WARNING, self)
+            return
+        if not updates:
+            return
+        if (self.container_snapshot.get("paired_cross_chunk")
+                and len({slot // 27 for slot in updates}) == 2
+                and not callable(getattr(self.container_world.level_wrapper.level_db,
+                                         "put_batch", None))):
+            message = ("This save will update two different chunks using separate LevelDB writes. "
+                       "A recovery record will be created first, but this is not atomic. "
+                       "Continue only if this world has an independent backup?")
+            if wx.MessageBox(message, "Cross-Chunk Save Warning",
+                             wx.YES_NO | wx.NO_DEFAULT | wx.ICON_WARNING, self) != wx.YES:
+                return
+        try:
+            count = _save_selected_container_items_direct(
+                self.container_world, self.container_snapshot, updates)
+        except ValueError as error:
+            wx.MessageBox(str(error), "Container Not Saved", wx.OK | wx.ICON_WARNING, self)
+            return
+        except Exception as error:
+            wx.MessageBox(f"Container write could not be verified: {type(error).__name__}: {error}. "
+                          "Inspect this world and its backup before continuing.",
+                          "Container Save Error", wx.OK | wx.ICON_ERROR, self)
+            return
+        try:
+            saved_items = _selected_container_accept_verified_save(
+                self.container_world, self.container_snapshot, updates)
+        except Exception as error:
+            wx.MessageBox(
+                f"LevelDB was written, but the editor could not refresh its save baseline: "
+                f"{type(error).__name__}: {error}. Reopen the world before another save.",
+                "Container Refresh Error", wx.OK | wx.ICON_ERROR, self)
+            return
+        self._container_staging.player_data["Items"] = copy.deepcopy(saved_items)
+        self.SetTitle(f"{self._container_title} / Saved {count} slot(s)")
+        try:
+            outcome = _selected_container_sync_amulet_cache(
+                self.container_world, self.container_snapshot)
+        except Exception as error:
+            # The direct LevelDB write is complete. A cache failure must not
+            # reinterpret that verified primary save as a failed disk write.
+            print(f"Selected container Amulet sync skipped after direct save: "
+                  f"{type(error).__name__}: {error}")
+            self.SetTitle(f"{self._container_title} / Saved {count} slot(s) / Amulet sync unavailable")
+            if not getattr(self, "_container_sync_warning_shown", False):
+                self._container_sync_warning_shown = True
+                wx.MessageBox(
+                    "The container was saved directly to LevelDB and verified, but "
+                    "Amulet synchronization failed. Amulet Save may overwrite the "
+                    "saved inventory or other stale chunk data. Reopen the world "
+                    "before using Amulet Save. The plugin's direct Save remains available. "
+                    "See the console for the synchronization error.",
+                    "Amulet Synchronization Warning", wx.OK | wx.ICON_WARNING, self)
+        else:
+            self._container_sync_warning_shown = False
+            self.SetTitle(f"{self._container_title} / Saved {count} slot(s) / Amulet synced")
+            print(f"Selected container Amulet sync: {outcome}.")
+
+
 class IconListCtrl(wx.Frame):
     def __init__(self, parent, title, data, slot):
         super().__init__(parent, title=title, size=(980, 700), style=_float_on_parent_style())
@@ -4256,10 +5711,7 @@ class IconListCtrl(wx.Frame):
         self.font = wx.Font(_ui_metric(self, 11, 12), wx.FONTFAMILY_ROMAN, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD)
         self.item_font = wx.Font(_ui_metric(self, 10, 11), wx.FONTFAMILY_ROMAN, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD)
         self.SetFont(self.font)
-        self.bmp = 0
-        # Calibrated logical icon size.  The bitmap added to wx.ImageList is
-        # rebuilt to this exact same logical size below, which avoids the
-        # ImageList mismatch that caused the earlier image-loading regression.
+        # Match the ImageList cell size to each inserted bitmap's logical size.
         # Catalog artwork is calibrated separately from the surrounding cell
         # geometry.  Keep the 100% icon modest, add a small midpoint increase,
         # and give the 225% endpoint enough artwork to remain visually balanced
@@ -4352,7 +5804,7 @@ class IconListCtrl(wx.Frame):
             event.Skip()
 
     def _size_catalog_filter_controls(self, button_width, search_width):
-        """Match Filter/search heights using their font-aware native best size."""
+        """Match Filter / search heights using their font-aware native best size."""
         # Best-size values are font- and platform-dependent.  Recompute them
         # after applying the Catalog font, then use the larger native height so
         # the adjacent controls stay aligned without hard-coding a DPI height.
@@ -4907,7 +6359,7 @@ class BannerSelector(wx.Frame):
         self.pattern_panel.Refresh()
 
     def on_select_pattern(self, event):
-        # Reset previous selection if exists
+        # Clear the previous pattern selection.
         if self.selected_pattern_button:
             self.selected_pattern_button.SetBackgroundColour(wx.Colour(0, 0, 0))  # Black
             self.selected_pattern_button.Refresh()
@@ -5384,7 +6836,8 @@ class ItemTools:
         _self.clear_bitmap()
         _self.SetBitmap(wx.NullBitmap, "Empty")
         _self.count_box.SetValue("0")
-        _self.Close()
+        if not isinstance(_self.editor.selected_player, SelectedContainerStaging):
+            _self.Close()
         _self.Layout()
         _self.Refresh()
 
@@ -6022,8 +7475,9 @@ class IconButton(wx.Panel):
             else:
                 # Only the Ender Chest shares the 1440p / 150% slot calibration;
                 # other containers use the normal scaling curve.
-                slot_edge = (92 if ("Ender" in editor.GetTitle() and
-                                    _ui_is_1440p_150(editor))
+                slot_edge = (92 if (("Ender" in editor.GetTitle() or
+                                     getattr(editor, "container_snapshot", None) is not None)
+                                    and _ui_is_1440p_150(editor))
                              else _ui_metric_three(editor, 76, 104, 154))
                 slot_font = _ui_metric(editor, 12, 14)
             self._button_size = (slot_edge, slot_edge)
@@ -6033,7 +7487,8 @@ class IconButton(wx.Panel):
         # The item atlas retains its normal 64 px Windows path at all other
         # display settings and in other container windows.
         target_inventory_ui = self._main_inventory_ui or (
-            self._compact_ui and "Ender" in editor.GetTitle()
+            self._compact_ui and ("Ender" in editor.GetTitle()
+                                  or getattr(editor, "container_snapshot", None) is not None)
         )
         self._bitmap_size = (
             76 if target_inventory_ui and _ui_is_1440p_150(editor) else None
@@ -6128,7 +7583,7 @@ class IconButton(wx.Panel):
             wx.CallAfter(self._restore_drag_slot_visuals, slots)
 
     def _restore_drag_slot_visuals(self, slots):
-        """Reset native hover/focus states only for slots touched by a drag."""
+        """Reset native hover / focus states only for slots touched by a drag."""
         for slot in slots:
             try:
                 slot._restore_slot_after_popup(slot.button)
@@ -6137,7 +7592,7 @@ class IconButton(wx.Panel):
                 pass
 
     def _restore_slot_after_popup(self, button):
-        """Remove stale native button hover/focus state after menus or drags."""
+        """Remove stale native button hover / focus state after menus or drags."""
         try:
             if not button or not button.IsShownOnScreen():
                 return
@@ -6204,6 +7659,15 @@ class IconButton(wx.Panel):
         source_editor_keys = CLIP_BOARD.get('NESTED_KEYS')
         target_key, target_slot = self.Get_slot_map_key()
 
+        source_control = CLIP_BOARD.get('SOURCE_SELF')
+        if (source_control is not None
+                and source_control.editor.selected_player is not self.editor.selected_player
+                and (isinstance(source_control.editor.selected_player, SelectedContainerStaging)
+                     or isinstance(self.editor.selected_player, SelectedContainerStaging))):
+            # Two different LevelDB records cannot be moved by one UI-only drag.
+            source_control._finish_drag_visual()
+            CLIP_BOARD.clear()
+            return False
         source_path = source_editor_keys + [source_key]
         target_path = self.editor.keys + [target_key]
         test_source = source_editor_keys + [source_key, source_slot]
@@ -6957,7 +8421,7 @@ class IconButton(wx.Panel):
         return item_names
 
     def _menu_group_index(self, subgroup, item_name):
-        """Return the stable type/material group used before alphabetizing."""
+        """Return the stable type / material group used before alphabetizing."""
         shape_groups = {'Walls', 'Fences', 'Fence_Gates', 'Stairs', 'Slabs', 'Doors', 'Trapdoors'}
         if subgroup in shape_groups:
             # Keep the same broad material families together inside large shape
@@ -8935,7 +10399,6 @@ class MyTreeCtrl(wx.TreeCtrl):
         def TraverseAux(node, depth, func):
             nc = self.GetChildrenCount(node, 0)
             child, cookie = self.GetFirstChild(node)
-            # In wxPython 2.5.4, GetFirstChild only takes 1 argument
             for i in range(nc):
                 func(child, depth)
                 TraverseAux(child, depth + 1, func)
@@ -9012,7 +10475,6 @@ class MyTreeCtrl(wx.TreeCtrl):
         child, cookie = self.GetFirstChild(root)
         orderit = []
         orderit.append(self.GetItemData(child)[0])
-        # In wxPython 2.5.4, GetFirstChild only takes 1 argument
         for i in range(nc):
             child, cookie = self.GetNextChild(child, cookie)
             if child.IsOk():
@@ -11707,7 +13169,7 @@ class BedRock(wx.Panel):
 
             else:
                 responce = EntitiePlugin.con_boc(self, "Backup",
-                                                 ",This will back up all Entities within this selection/s >" + str(
+                                                 "This will back up all entities within the current selection: " + str(
                                                      self.canvas.selection.selection_group))
                 if responce == True:
                     return
@@ -12991,7 +14453,7 @@ class Java(wx.Panel):
                 self._import_nbt(_)
             except ValueError as e:
                 EntitiePlugin.Onmsgbox(self, "No Selection",
-                                       "You must select a area in the world to start from, \n Note: Just one block will work. It builds from the South/West")
+                                       "You must select a area in the world to start from, \n Note: Just one block will work. It builds from the south / west")
             return
 
         if dlg.list.GetValue():
@@ -21456,14 +22918,13 @@ class Tools(wx.Frame):
                       font_size=14)
 
         CustomToolTip(self, self._finder_replacer,
-                      text="The latest Finder Replacer now has a fast apply feature.\n"
-                           "Directly use the find and replace text boxes.\n"
+                      text="Find and replace blocks using the text fields.\n"
+                           "Apply changes directly from the editor.\n"
                            "Use the Helper tool to speed up block listing.",
                       font_size=14)
 
         CustomToolTip(self, self._portals_and_border_walls,
-                      text="Delete all portals and/or border walls. and delete all items from item containers\n"
-                           "More features will be added soon.",
+                      text="Delete portals, border walls, or items stored in containers.",
                       font_size=14)
 
         CustomToolTip(self, self._player_inventory,
@@ -21479,7 +22940,7 @@ class Tools(wx.Frame):
                       font_size=14)
 
         CustomToolTip(self, self._shape_painter,
-                      text="An attempt at creating a brush tool. Still needs work.",
+                      text="Paint blocks using the Shape Painter tool. Some functions may be incomplete.",
                       font_size=14)
 
         CustomToolTip(self, self._random_filler,
