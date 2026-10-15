@@ -20376,7 +20376,8 @@ class SetPlayersData(wx.Frame):
         if self.platform == "bedrock":
             self.achieve = wx.Button(self, label="Re-enable Achievements")
             self.achieve.Bind(wx.EVT_BUTTON, self.re_enable_achievements)
-            self.is_hardcore = self.world.level_wrapper.root_tag.get("IsHardcore", None)
+            hardcore_tag = self.world.level_wrapper.root_tag.get("IsHardcore", None)
+            self.is_hardcore = getattr(hardcore_tag, "py_int", hardcore_tag)
 
             if self.is_hardcore == 1:
                 self.set_hardcore = wx.Button(self, label="Disable Hardcore")
@@ -20695,7 +20696,8 @@ class SetPlayersData(wx.Frame):
                       "INFO", wx.OK | wx.ICON_INFORMATION)
 
     def set_hardcore_mode(self, _):
-        self.is_hardcore = self.world.level_wrapper.root_tag.get('IsHardcore', None)
+        hardcore_tag = self.world.level_wrapper.root_tag.get('IsHardcore', None)
+        self.is_hardcore = getattr(hardcore_tag, "py_int", hardcore_tag)
         if self.is_hardcore == 1:
             self.set_hardcore.SetLabel("Enable Hardcore")
             self.world.level_wrapper.root_tag['IsHardcore'] = ByteTag(0)
