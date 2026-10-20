@@ -2795,7 +2795,7 @@ class PlayersData:
     def get_loaded_players_list(self):
         return [x for x in self.dict_of_player_data.keys()]
 
-    def load_players_data(self):  # made it faster by using iterate 2 ranges
+    def load_players_data(self):  # Read local and server player records separately.
         for k, v in self.leveldb.iterate(start=b'~local_player'
                 , end=b'~local_player' * 2):
             if b'~local_player' in k:
@@ -3454,9 +3454,8 @@ class IconResources:
         scale = _ui_dpi_scale(window) if window is not None else 1.0
 
         # wxMSW does not use bitmap scale factors for logical drawing size.
-        # Keep the existing 64 px route unchanged. Explicit alternate pixel
-        # sizes are for calibrated inventory slots only, with the original
-        # bitmap as a safe fallback if image conversion fails.
+        # Use the 64 px default bitmap cache; calibrated inventory slots can
+        # request alternate pixel sizes, with the cached image as a fallback.
         if getattr(wx, "Platform", "") == "__WXMSW__":
             fallback = self.scaled_cache.get(bedrock_id, wx.NullBitmap)
             try:
@@ -5162,14 +5161,8 @@ class InventoryEditor(wx.Frame):
             key, slot = x.Get_slot_map_key()
             current_keys = self.keys + [key]
             current = self.selected_player[current_keys]
-            slot_id = slot  # Keep the original slot identifier.
-
-            # Find the item with the matching 'Slot'
-            item_index = next(
-                (i for i, item in enumerate(current)
-                 if item.get('Slot', IntTag(-99)).py_int == slot_id),
-                None
-            )
+            # Root Armor / Offhand arrays use positions; other lists use Slot tags.
+            item_index = _inventory_item_index(current, slot, current_keys)
 
             if item_index is None:
 
@@ -5221,7 +5214,7 @@ class InventoryEditor(wx.Frame):
 
         armor_buttons = []
         data_damage_tag_list_of = ['firework_star', 'bed', 'splash_potion', 'lingering_potion', 'potion',
-                                   'ominous_bottle', 'goat_horn']
+                                   'ominous_bottle', 'goat_horn', 'arrow']
 
         def more_display_info(display_name, item):
             if not item:
@@ -5270,7 +5263,11 @@ class InventoryEditor(wx.Frame):
                 if item_name == 'banner':
                     item_name = f'{color_dict.get(damage, "white")}_{item_name}'
                 elif item_name in data_damage_tag_list_of:
-                    item_name = f"{item_name}:{damage}"
+                    variant_name = f"{item_name}:{damage}"
+                    # Some default Damage=0 items use the base atlas ID, not :0.
+                    if (damage != 0 or variant_name in self.resources.get_json_data
+                            or item_name not in self.resources.get_json_data):
+                        item_name = variant_name
 
                 if item.get('tag'):
                     for k, v in item['tag'].items():
@@ -5370,6 +5367,12 @@ class InventoryEditor(wx.Frame):
 
             offhand_item = next((item for item in self.inventory.get('Offhand', [])), None)
             item_name = offhand_item["Name"].py_str[10:] if offhand_item and "Name" in offhand_item else ''
+            if item_name == 'arrow':
+                damage_tag = offhand_item.get('Damage', None)
+                damage = getattr(damage_tag, 'py_int', damage_tag)
+                variant_name = f'arrow:{damage}'
+                if variant_name in self.resources.get_json_data:
+                    item_name = variant_name
             display_name = self.resources.get(item_name, {}).get("display_name", "Empty")
             display_name = more_display_info(display_name, offhand_item)
             count = offhand_item.get("Count", 1) if offhand_item else 0
@@ -5627,7 +5630,8 @@ class SelectedContainerInventoryEditor(InventoryEditor):
                     # The native menu may update a bitmap before inserting NBT.
                     if not isinstance(visual_name, str) or not visual_name:
                         raise ValueError(f"Slot {slot} has no item data.")
-                    current = _new_selected_container_item("minecraft:" + visual_name, slot)
+                    item_id = visual_name if ":" in visual_name else "minecraft:" + visual_name
+                    current = _new_selected_container_item(item_id, slot)
                 new_item = copy.deepcopy(current)
                 new_item["Count"] = ByteTag(count)
             previous = original.get(slot)
@@ -6848,7 +6852,10 @@ class ItemTools:
         keys = _self.editor.keys + list(_self.Get_slot_map_key())
         last_data = _self.editor.selected_player[keys]
 
-        tag = last_data.get('tag', CompoundTag({}))
+        tag = last_data.get('tag')
+        if tag is None:
+            tag = CompoundTag({})
+            last_data['tag'] = tag
 
         if 'Unbreakable' in tag:
             tag.pop('Unbreakable')
@@ -6859,7 +6866,10 @@ class ItemTools:
         keys = _self.editor.keys + list(_self.Get_slot_map_key())
         last_data = _self.editor.selected_player[keys]
 
-        tag = last_data.get('tag', CompoundTag({}))
+        tag = last_data.get('tag')
+        if tag is None:
+            tag = CompoundTag({})
+            last_data['tag'] = tag
 
         if 'minecraft:keep_on_death' in tag:
             tag.pop('minecraft:keep_on_death')
@@ -6885,7 +6895,7 @@ class ItemTools:
                 print("Error: Invalid selection(s).")
                 return
 
-            # Example of how to modify the current NBT data (assuming the data is structured correctly)
+            # Apply the trim to the selected item's NBT.
             keys = _self.editor.keys + list(_self.Get_slot_map_key())
             current_nbt_data = _self.editor.selected_player[keys]
             if current_nbt_data.get('tag', None):
@@ -8133,7 +8143,7 @@ class IconButton(wx.Panel):
         screen_pos = wx.GetMousePosition()
         client_pos = self.ScreenToClient(screen_pos)
 
-        # Adjust values here (try -5, -10 etc. until it's perfectly aligned)
+        # Open the context menu near the pointer.
         adjusted_pos = wx.Point(client_pos.x + 10, client_pos.y + 10)
 
         try:
@@ -8167,8 +8177,9 @@ class IconButton(wx.Panel):
         if isinstance(self.button, wx.Button) and self.button.GetName() != 'Save':
             self.handle_button_click(self.button)
     def setup_load_check_button_or_text(self):
+        bedrock_id = self.bedrock_id
 
-        if self.bedrock_id and not self.icon_bitmap:
+        if bedrock_id and not self.icon_bitmap:
             self.button = wx.Button(self, size=self._button_size, label=bedrock_id)
             font = self.button.GetFont()
             font.SetPointSize(10)  # Make text smaller
@@ -8252,13 +8263,23 @@ class IconButton(wx.Panel):
         self.show_popup_menu(menu)
 
     def handle_offhand(self, menu):
+        """Offer stable Bedrock offhand choices without restricting manual edits."""
+        arrow_variants = sorted(
+            (item for item in SLOT_MENU_CATEGORIES['Combat']['Arrows']
+             if item.startswith('arrow:')),
+            key=lambda item: self._menu_sort_key('Tipped Arrows', item),
+        )
         off_hand = {
-            "Arrows": range(939, 950),
-            "More Arrows": range(950, 979),
-            "Most_used(may not work)": [982, 1214, 1696, 1046],
+            'Most Used': ['shield', 'totem_of_undying'],
+            'Arrows': ['arrow'],
+            'Tipped Arrows': arrow_variants[:22],
+            'More Tipped Arrows': arrow_variants[22:],
+            'Maps': ['map'],
+            'Firework Rockets': ['firework_rocket'],
+            'Other': ['nautilus_shell'],
         }
-        for category, item_range in off_hand.items():
-            self.create_submenu(menu, category, item_range)
+        for category, item_names in off_hand.items():
+            self.create_submenu(menu, category, item_names)
 
     def show_popup_menu(self, menu):
         screen_pos = wx.GetMousePosition()
@@ -8273,13 +8294,6 @@ class IconButton(wx.Panel):
     def SetName(self, name):
         self.button.SetName(name)
 
-    def create_submenu(self, menu, category, item_range):
-        submenu = wx.Menu()
-        for item in item_range:
-            menu_item = wx.MenuItem(submenu, wx.ID_ANY, f"Item {item}")
-            submenu.Append(menu_item)
-        menu.AppendSubMenu(submenu, category)
-
     def on_menu_item_selected(self, event, bedrock_id):
         """Handle selection of an item from the menu."""
         self.namespace = 'minecraft:'
@@ -8287,7 +8301,17 @@ class IconButton(wx.Panel):
         self.title = self.editor.GetTitle()
         self.button.SetName(bedrock_id)
         key, slot = self.Get_slot_map_key()
-
+        item_id = bedrock_id
+        item_damage = 0
+        # The atlas indexes certain Bedrock variants by Damage rather than
+        # a distinct item Name. Decode those keys for every inventory slot.
+        variant = re.fullmatch(
+            r'(arrow|bed|potion|splash_potion|lingering_potion|goat_horn|ominous_bottle):([0-9]+)',
+            bedrock_id,
+        )
+        if variant is not None:
+            item_id = variant.group(1)
+            item_damage = int(variant.group(2))
 
         current_nbt = self.editor.selected_player[self.editor.keys]
         nbt = current_nbt[key]
@@ -8298,8 +8322,8 @@ class IconButton(wx.Panel):
 
         # Initialize default tag structure
         self.tag_data = CompoundTag({
-            "Name": StringTag(self.namespace + self.bedrock_id),
-            "Damage": ShortTag(0),
+            "Name": StringTag(self.namespace + item_id),
+            "Damage": ShortTag(item_damage),
             "Count": ByteTag(1),
             "Slot": ByteTag(self.slot),
             "tag": CompoundTag({})
@@ -8620,24 +8644,10 @@ class IconButton(wx.Panel):
             self.Bind(wx.EVT_MENU, lambda event, idx=item_id: self.on_menu_item_selected(menu, self.editor.resources.get_items_id[idx]), menu_item)
 
     def create_submenu(self, parent_menu, submenu_name, item_range):
-        """Creates a submenu with the provided item range."""
+        """Add icon-labeled items using the shared stable-ID menu builder."""
         submenu = wx.Menu()
-        item_names = self._resolve_menu_refs(item_range)
-        for item_name in item_names:
-            icon_bitmap = self.editor.resources.get_scaled_cache32.get(item_name, wx.NullBitmap)
-            display_name = self.editor.resources.data.get(item_name, {}).get('display_name', item_name)
-
-            menu_item = wx.MenuItem(submenu, wx.ID_ANY, display_name)
-            menu_item.SetBitmap(icon_bitmap)
-            submenu.Append(menu_item)
-
-            self.Bind(
-                wx.EVT_MENU,
-                lambda event, bid=item_name: self.on_menu_item_selected(parent_menu, bid),
-                menu_item,
-            )
-
         parent_menu.AppendSubMenu(submenu, submenu_name.replace('_', ' '))
+        self._populate_menu_with_ranges(submenu, item_range, submenu_name)
 
     def Get_slot_map_key(self): # Main Slot Key tracking
         return self.slot_map_key
@@ -9081,7 +9091,7 @@ class RemapVillagers(wx.Frame):
                 ]
             }
         }
-        flags = {  # this causes the enchantments to alternate between tools
+        flags = {  # Alternate enchantment combinations for eligible tools.
             'minecraft:diamond_boots': False,
             'minecraft:diamond_pickaxe': False,
             'minecraft:diamond_axe': False,
@@ -9118,7 +9128,9 @@ class RemapVillagers(wx.Frame):
                     if item_name in flags.keys():
                         toggle_enchantment(item_name)
                 if 1 in self.check_list.GetCheckedItems():
-                    r['sell']['tag']['Unbreakable'] = ByteTag(1)  # Make item unbreakable
+                    if 'tag' not in r['sell']:
+                        r['sell']['tag'] = CompoundTag({})
+                    r['sell']['tag']['Unbreakable'] = ByteTag(1)
 
         selection = self.list.GetStringSelection()
         sel_byte = selection.split(':')[1].encode()
@@ -9483,47 +9495,86 @@ class ResetVaults():
         self.progress = ProgressBar()
 
     def reset_vaults(self):
-
-        chunks = self.world.all_chunk_coords(self.canvas.dimension)
-        total = len([c for c in chunks])
-        cnt = 0
+        """Reset vault reward tracking and report incomplete chunk operations."""
+        # Retain the coordinates for the progress count and the actual scan.
+        chunks = list(self.world.all_chunk_coords(self.canvas.dimension))
+        total = len(chunks)
+        processed = 0
+        written_records = 0
+        cleared_lists = 0
+        failures = []
         for chunk in chunks:
-            cnt += 1
-            self.progress.progress_bar(total, cnt, title="Resetting all vaults", text="Chunk...")
+            processed += 1
+            self.progress.progress_bar(total, processed, title="Resetting all vaults", text="Chunk...")
             cx, cz = chunk
             if self.world.level_wrapper.platform == 'bedrock':
                 key = self.get_dim_chunkkey(cx, cz)
                 try:
-                    self.level_db.delete(key + b'w') # Ox77
-                except:
-                    pass
+                    self.level_db.delete(key + b'w')  # Ox77
+                except KeyError:
+                    pass  # Chunks do not all have a vault index record.
+                except Exception as error:
+                    failures.append((cx, cz, "vault index", type(error).__name__))
                 try:
                     be_data = self.level_db.get(key + b"1")
+                except KeyError:
+                    continue  # Chunks without block entities are normal.
+                except Exception as error:
+                    failures.append((cx, cz, "block-entity read", type(error).__name__))
+                    continue
+                try:
                     nbt_data = unpack_nbt_list(be_data)
+                    pending_lists = 0
                     for d in nbt_data:
                         if "rewarded_players" in d.to_snbt():
-                            print(d['data']['rewarded_players'].to_snbt())
                             d['data']['rewarded_players'] = ListTag([])
-
+                            pending_lists += 1
                     raw_list = pack_nbt_list(nbt_data)
                     self.level_db.put(key + b"1", raw_list)
-                except:
-                    pass
-            else: #java
-                if self.world.has_chunk(cx, cz, self.canvas.dimension):
-                    chunk = self.world.level_wrapper.get_raw_chunk_data(cx, cz, self.canvas.dimension)
+                    written_records += 1
+                    cleared_lists += pending_lists
+                except Exception as error:
+                    failures.append((cx, cz, "block-entity update", type(error).__name__))
+            else:  # Java uses raw chunk records instead of Bedrock LevelDB keys.
+                try:
+                    if self.world.has_chunk(cx, cz, self.canvas.dimension):
+                        chunk_data = self.world.level_wrapper.get_raw_chunk_data(
+                            cx, cz, self.canvas.dimension)
+                        if chunk_data.get('block_entities', None):
+                            changed = False
+                            pending_lists = 0
+                            for nbt in chunk_data['block_entities']:
+                                if "vault" in nbt.to_snbt():
+                                    changed = True
+                                    if 'rewarded_players' in nbt['server_data']:
+                                        pending_lists += 1
+                                    nbt['server_data'].pop('rewarded_players', None)
+                            if changed:
+                                self.world.level_wrapper.put_raw_chunk_data(
+                                    cx, cz, chunk_data, self.canvas.dimension)
+                                written_records += 1
+                                cleared_lists += pending_lists
+                except Exception as error:
+                    failures.append((cx, cz, "Java chunk update", type(error).__name__))
 
-                    if chunk.get('block_entities', None):
-                        changed = False
-                        for nbt in chunk['block_entities']:
-                            if "vault" in nbt.to_snbt():
-                                changed = True
-                                nbt['server_data'].pop('rewarded_players', None)
-
-                        if changed:
-                            self.world.level_wrapper.put_raw_chunk_data(cx, cz, chunk, self.canvas.dimension)
-        wx.MessageBox("All Vaults should be reset.",
-                      "INFO", wx.OK | wx.ICON_INFORMATION)
+        message = (f"Scanned {processed} chunk(s) in {self.canvas.dimension}.\n"
+                   f"Completed {written_records} block-entity / chunk writes.\n"
+                   f"Processed {cleared_lists} rewarded-player list(s).")
+        if failures:
+            examples = "; ".join(
+                f"({cx}, {cz}) {stage}: {error_type}"
+                for cx, cz, stage, error_type in failures[:3]
+            )
+            message += (f"\n{len(failures)} operation(s) failed. Some changes may have been saved."
+                        f"\nFirst reported failures: {examples}"
+                        "\nCheck the affected data before using the world.")
+            icon = wx.ICON_WARNING
+            heading = "Vault Reset Incomplete"
+        else:
+            message += "\nNo operation errors were reported. Verify results in Minecraft."
+            icon = wx.ICON_INFORMATION
+            heading = "Vault Reset Scan Complete"
+        wx.MessageBox(message, heading, wx.OK | icon)
 
     @property
     def level_db(self):
@@ -12285,9 +12336,13 @@ class ShapePainter(wx.Frame):
         spin_size = (self.FromDIP(90), -1)
         self.int_size = wx.SpinCtrl(self, initial=4, size=spin_size)
         self.int_size.Bind(wx.EVT_SPINCTRL, self.size_on_change)
+        self.int_size.Bind(wx.EVT_TEXT, self.size_on_change)
         self.int_y = wx.SpinCtrl(self, initial=4, size=spin_size)
         self.int_x = wx.SpinCtrl(self, initial=4, size=spin_size)
         self.int_z = wx.SpinCtrl(self, initial=4, size=spin_size)
+        for axis in (self.int_x, self.int_y, self.int_z):
+            axis.Bind(wx.EVT_SPINCTRL, self._axis_on_change)
+            axis.Bind(wx.EVT_TEXT, self._axis_on_change)
 
         # Two balanced rows keep the Size / Y / X / Z fields inside the window.
         for label, spinner in ((self.l_int_size, self.int_size),
@@ -12340,9 +12395,34 @@ class ShapePainter(wx.Frame):
         print("\033c\033[3J", end='')
 
     def size_on_change(self, _):
-        self.int_y.SetValue(self.int_size.GetValue())
-        self.int_x.SetValue(self.int_size.GetValue())
-        self.int_z.SetValue(self.int_size.GetValue())
+        size = self.int_size.GetValue()
+        self._updating_uniform_size = True
+        try:
+            self.int_y.SetValue(size)
+            self.int_x.SetValue(size)
+            self.int_z.SetValue(size)
+        finally:
+            self._updating_uniform_size = False
+        self._refresh_brush_from_controls()
+
+    def _axis_on_change(self, _):
+        if not getattr(self, '_updating_uniform_size', False):
+            self._refresh_brush_from_controls()
+
+    def _refresh_brush_from_controls(self):
+        # Regenerate at the last valid pointer position without moving or writing blocks.
+        if not self._pause_pointer or not (self._is_enabled or self.click):
+            return
+        if len(self.point_evt) != 3:
+            return
+        values = (self.options.GetSelection(), self.int_size.GetValue(),
+                  self.int_x.GetValue(), self.int_y.GetValue(), self.int_z.GetValue())
+        if values == (self.v1, self.v2, self.v3, self.v4, self.v5):
+            return
+        self.v1, self.v2, self.v3, self.v4, self.v5 = values
+        self.location_last = tuple(self.point_evt)
+        self.sg = SelectionGroup(self.cusotome_brush(*self.location_last))
+        self.canvas.selection.set_selection_group(self.sg.merge_boxes())
 
     def cusotome_brush(self, mx, my, mz):
         xx = (mx + mx + 1) >> 1
@@ -12536,7 +12616,7 @@ class ShapePainter(wx.Frame):
                     if (
                             self.options.GetSelection(), self.int_size.GetValue(), self.int_x.GetValue(),
                             self.int_y.GetValue(),
-                            self.int_y.GetValue()) == (self.v1, self.v2, self.v3, self.v4, self.v5):
+                            self.int_z.GetValue()) == (self.v1, self.v2, self.v3, self.v4, self.v5):
                         px, py, pz = evt.point
                         lx, ly, lz = self.location_last
 
@@ -12549,17 +12629,15 @@ class ShapePainter(wx.Frame):
                         self.location_last = (px, py, pz)
 
                     else:
-                        self.v1, self.v2, self.v3, self.v4, self.v5 = self.options.GetSelection(), self.int_size.GetValue(), self.int_x.GetValue(), self.int_y.GetValue(), self.int_y.GetValue()
+                        self.v1, self.v2, self.v3, self.v4, self.v5 = self.options.GetSelection(), self.int_size.GetValue(), self.int_x.GetValue(), self.int_y.GetValue(), self.int_z.GetValue()
                         self.location_last = evt.point
                         selboxs = self.cusotome_brush(x, y, z)
                         self.sg = SelectionGroup(selboxs)
                         merge = self.sg.merge_boxes()
                         self.canvas.selection.set_selection_group(merge)
 
-                evt.Skip()
         else:
             self.current_point = evt.point
-            evt.Skip()
         evt.Skip()
 
     def _refresh_chunk(self, dimension, world, x, z):
@@ -12990,11 +13068,9 @@ class ExportImportCostomDialog(wx.Dialog):
         self.Destroy()
 
 class BedRock(wx.Panel):
-    def __int__(self, world, canvas):
-        wx.Panel.__init__(self, parent)
-        self.world = world
-        self.canvas = canvas
-        self.actors =  collections.defaultdict(list)
+    def __init__(self):
+        super().__init__()
+        self.actors = collections.defaultdict(list)
         self.digp = collections.defaultdict(list)
 
     def get_raw_data_new_version(self, is_export=False, all_enty=False):
@@ -14184,15 +14260,6 @@ class BedRock(wx.Panel):
 
 class Java(wx.Panel):
 
-    def __int__(self, world, canvas):
-        wx.Panel.__init__(self, parent)
-        self.world = world
-        self.canvas = canvas
-        select_chunks = self.canvas.selection.selection_group.chunk_locations()  # selection_group.chunk_locations()
-        all_chunks = [x for x in self.world.level_wrapper.all_chunk_coords(self.canvas.dimension)]
-        dim = struct.unpack("<i", self.get_dim_value())[0]
-        custom_filter = self.filter.GetValue().split(",")
-
     def _delete_from_list(self, e):
         res = EntitiePlugin.important_question(self)
         if res == False:
@@ -15194,8 +15261,7 @@ class EntitiePlugin(wx.Frame):
             pad,
         )
 
-        # Preserve the original conditional behavior without forcing a large
-        # fixed-height list or negative grid spacing.
+        # Hide dead-entity controls for world formats that do not support them.
         if self.world.level_wrapper.platform == "bedrock":
             if self.world.level_wrapper.version < (1, 18, 30, 4, 0):
                 if hasattr(self, "list_dead"):
