@@ -5597,6 +5597,8 @@ class IconListCtrl(wx.Frame):
         self.list_ctrl.Bind(wx.EVT_LEFT_DOWN, self.OnMouseDown)
         self.list_ctrl.Bind(wx.EVT_MOTION, self.OnMouseMove)
         self.list_ctrl.Bind(wx.EVT_LEFT_UP, self.OnMouseUp)
+        self.list_ctrl.Bind(wx.EVT_RIGHT_DOWN, self._on_catalog_right_down)
+        self.list_ctrl.Bind(wx.EVT_MOUSE_CAPTURE_LOST, self._on_catalog_capture_lost)
 
         self.button.Bind(wx.EVT_BUTTON, self.filter_string)
         self.filterstring.Bind(wx.EVT_TEXT_ENTER, self.filter_string)
@@ -5691,8 +5693,6 @@ class IconListCtrl(wx.Frame):
         if not bedrock_id:
             return
 
-        DRAG_DATA_SOURCE['id'] = bedrock_id
-
         image_index = self.list_ctrl.GetItem(index).GetImage()
         bmp = self.image_list.GetBitmap(image_index)
         if not bmp or not bmp.IsOk():
@@ -5703,30 +5703,26 @@ class IconListCtrl(wx.Frame):
         drag_image = wx.DragImage(bmp)
         try:
             if not drag_image.BeginDrag((30, 30), self.list_ctrl, fullScreen=True):
-                self.dragged_index = None
-                self.dragged_id = None
+                self._end_catalog_drag(cancel=True)
                 return
-
-
+            self.drag_image = drag_image
+            DRAG_DATA_SOURCE['id'] = bedrock_id
             drag_image.Move(pos)
             drag_image.Show()
-            self.drag_image = drag_image
         except Exception:
-            try:
-                drag_image.EndDrag()
-            except Exception:
-                pass
-            self.drag_image = None
-            self.dragged_index = None
-            self.dragged_id = None
+            self._end_catalog_drag(cancel=True)
             raise
 
-    def OnMouseUp(self, evt):
-        drag_image = getattr(self, "drag_image", None)
-        dragged_index = getattr(self, "dragged_index", None)
-        dragged_id = getattr(self, "dragged_id", None)
-
-
+    def _end_catalog_drag(self, cancel=False, expected_image=None):
+        drag_image = self.drag_image
+        if expected_image is not None and drag_image is not expected_image:
+            return
+        dragged_id = self.dragged_id
+        self.drag_image = None
+        self.dragged_index = None
+        self.dragged_id = None
+        if cancel and dragged_id and DRAG_DATA_SOURCE.get('id') == dragged_id:
+            DRAG_DATA_SOURCE.pop('id', None)
         if drag_image is not None:
             try:
                 drag_image.Hide()
@@ -5737,7 +5733,21 @@ class IconListCtrl(wx.Frame):
             except Exception:
                 pass
 
-        self.drag_image = None
+    def _on_catalog_right_down(self, event):
+        if self.drag_image is not None:
+            self._end_catalog_drag(cancel=True)
+        else:
+            event.Skip()
+
+    def _on_catalog_capture_lost(self, event):
+        drag_image = self.drag_image
+        if drag_image is not None:
+            wx.CallAfter(self._end_catalog_drag, True, drag_image)
+
+    def OnMouseUp(self, evt):
+        dragged_index = self.dragged_index
+        dragged_id = self.dragged_id
+        self._end_catalog_drag()
 
         screen_pt = self.list_ctrl.ClientToScreen(evt.GetPosition())
         if (
@@ -5754,11 +5764,8 @@ class IconListCtrl(wx.Frame):
             except Exception:
                 pass
 
-        self.dragged_index = None
-        self.dragged_id = None
-
-
     def on_close(self, event):
+        self._end_catalog_drag(cancel=True)
 
         try:
             self.HideWithEffect(effect=wx.SHOW_EFFECT_BLEND)
@@ -5767,8 +5774,10 @@ class IconListCtrl(wx.Frame):
 
     def _on_destroy(self, event):
         try:
-            if event.GetEventObject() is self and WINDOW.get('catalog') is self:
-                WINDOW['catalog'] = None
+            if event.GetEventObject() is self:
+                self._end_catalog_drag(cancel=True)
+                if WINDOW.get('catalog') is self:
+                    WINDOW['catalog'] = None
         except Exception:
             WINDOW['catalog'] = None
         if event is not None:
@@ -7849,6 +7858,10 @@ class IconButton(wx.Panel):
             )
 
     def on_right_click(self, event):
+        catalog = WINDOW.get('catalog')
+        if catalog is not None and getattr(catalog, 'drag_image', None) is not None:
+            catalog._end_catalog_drag(cancel=True)
+            return
 
         self.button.SetFocus()
 
