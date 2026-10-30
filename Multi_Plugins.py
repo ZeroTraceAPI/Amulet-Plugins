@@ -5170,7 +5170,7 @@ class InventoryEditor(wx.Frame):
 
             # Match banner colour identifiers when updating the inventory.
             colors = [key.lower() for key in list(custom_color_dict.keys())[1:]]
-            item_name = current[item_index]['Name'].py_str
+            item_name = current[item_index].get('Name', StringTag('')).py_str
             if 'banner' in item_name:
                 for color in colors:
                     if color in item_name:
