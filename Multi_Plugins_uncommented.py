@@ -6024,7 +6024,7 @@ PATTERN_KEY_TO_NAME = {
 
 class BannerSelector(wx.Frame):
     def __init__(self, parent, _self):
-        super().__init__(_self, title="Banner Selector", size=(545, 560), style=_float_on_parent_style())
+        super().__init__(_self, title="Banner Selector", style=_float_on_parent_style())
         self._self = _self
         self.parent = parent
         self.panel = wx.Panel(self)
@@ -6042,48 +6042,54 @@ class BannerSelector(wx.Frame):
         self.left_sizer = wx.BoxSizer(wx.VERTICAL)
 
 
-        self.pattern_panel = wx.ScrolledWindow(self.left_panel, size=(550, 250))
-        self.pattern_panel.SetScrollRate(10, 10)
-        self.pattern_sizer = wx.GridSizer(rows=0, cols=7, vgap=5, hgap=5)
-        self.pattern_panel.SetSizer(self.pattern_sizer)
-        self.left_sizer.Add(self.pattern_panel, 1, wx.EXPAND | wx.ALL, 5)
+        self.pattern_panel = wx.ScrolledWindow(self.left_panel, size=self.FromDIP(wx.Size(345, 395)))
+        self.pattern_panel.SetScrollRate(self.FromDIP(10), self.FromDIP(10))
+        self.pattern_sizer = wx.FlexGridSizer(rows=0, cols=7, vgap=self.FromDIP(7), hgap=self.FromDIP(7))
+        pattern_wrapper = wx.BoxSizer(wx.HORIZONTAL)
+        pattern_wrapper.AddStretchSpacer(1)
+        pattern_wrapper.Add(self.pattern_sizer, 0, wx.TOP, self.FromDIP(7))
+        pattern_wrapper.AddStretchSpacer(1)
+        self.pattern_panel.SetSizer(pattern_wrapper)
+        self.left_sizer.Add(self.pattern_panel, 1, wx.EXPAND | wx.ALL, self.FromDIP(7))
 
 
         self.color_panel = wx.Panel(self.left_panel)
         self.color_sizer = wx.GridSizer(rows=2, cols=8, vgap=2, hgap=2)
         self.color_buttons = []
         for i in range(16):
-            btn = wx.Button(self.color_panel, size=(40, 40))
+            btn = wx.Button(self.color_panel, size=self.FromDIP(wx.Size(40, 40)))
             btn.SetBackgroundColour(wx.Colour(*MC_COLORS[i]))
             btn.SetToolTip(COLOR_NAMES[i])
             btn.Bind(wx.EVT_BUTTON, lambda evt, idx=i: self.on_color_select(idx))
             self.color_sizer.Add(btn, 0, wx.EXPAND)
             self.color_buttons.append(btn)
         self.color_panel.SetSizer(self.color_sizer)
-        self.left_sizer.Add(self.color_panel, 0, wx.ALIGN_CENTER | wx.ALL, 5)
+        self.left_sizer.Add(self.color_panel, 0, wx.ALIGN_CENTER | wx.ALL, self.FromDIP(5))
 
         self.left_panel.SetSizer(self.left_sizer)
-        self.main_sizer.Add(self.left_panel, 1, wx.EXPAND)
+        self.main_sizer.Add(self.left_panel, 0, wx.EXPAND)
 
 
         self.right_panel = wx.Panel(self.panel)
         self.right_sizer = wx.BoxSizer(wx.VERTICAL)
+        self.right_sizer.AddStretchSpacer(1)
 
 
-        self.preview_bitmap = wx.StaticBitmap(self.right_panel, size=(PREVIEW_WIDTH, PREVIEW_HEIGHT))
-        self.right_sizer.Add(self.preview_bitmap, 0, wx.ALIGN_CENTER | wx.ALL, 10)
+        self.preview_size = self.FromDIP(wx.Size(PREVIEW_WIDTH, PREVIEW_HEIGHT))
+        self.preview_bitmap = wx.StaticBitmap(self.right_panel, size=self.preview_size)
+        self.right_sizer.Add(self.preview_bitmap, 0, wx.ALIGN_CENTER | wx.ALL, self.FromDIP(7))
 
 
         self.base_color_label = wx.StaticText(self.right_panel, label="Base Color:")
         self.right_sizer.Add(self.base_color_label, 0, wx.ALL, 5)
 
 
-        self.base_color_preview = wx.Panel(self.right_panel, size=(50, 50))
+        self.base_color_preview = wx.Panel(self.right_panel, size=self.FromDIP(wx.Size(42, 42)))
         self.base_color_preview.SetBackgroundColour(wx.Colour(*MC_COLORS[0]))
         self.right_sizer.Add(self.base_color_preview, 0, wx.ALL, 5)
 
 
-        self.nbt_output = wx.TextCtrl(self.right_panel, style=wx.TE_MULTILINE | wx.TE_READONLY, size=(200, 150))
+        self.nbt_output = wx.TextCtrl(self.right_panel, style=wx.TE_MULTILINE | wx.TE_READONLY, size=self.FromDIP(wx.Size(245, 105)))
         self.right_sizer.Add(self.nbt_output, 0, wx.EXPAND | wx.ALL, 5)
 
 
@@ -6101,9 +6107,10 @@ class BannerSelector(wx.Frame):
         button_sizer.Add(self.undo_button, 0, wx.ALL, 5)
 
         self.right_sizer.Add(button_sizer, 0, wx.ALIGN_CENTER)
+        self.right_sizer.AddStretchSpacer(1)
 
         self.right_panel.SetSizer(self.right_sizer)
-        self.main_sizer.Add(self.right_panel, 0, wx.EXPAND)
+        self.main_sizer.Add(self.right_panel, 1, wx.EXPAND | wx.ALL, self.FromDIP(8))
 
         self.panel.SetSizer(self.main_sizer)
 
@@ -6116,6 +6123,18 @@ class BannerSelector(wx.Frame):
         self.status_bar = self.CreateStatusBar(2)
         self.status_bar.SetStatusWidths([-3, -1])
         self.update_status_bar()
+        content_size = self.main_sizer.CalcMin()
+        self.SetMinClientSize(wx.Size(
+            max(self.FromDIP(710), content_size.width),
+            max(self.FromDIP(450), content_size.height)
+        ))
+        self.SetClientSize(wx.Size(
+            max(self.FromDIP(740), content_size.width + self.FromDIP(16)),
+            max(self.FromDIP(530), content_size.height + self.FromDIP(14))
+        ))
+        self.Layout()
+        self.CentreOnParent()
+        _clamp_window_to_display(self)
 
     def on_undo_pattern(self, event):
         if self.layered_selection:
@@ -6155,8 +6174,16 @@ class BannerSelector(wx.Frame):
             self.pattern_images.append(black_img)
 
     def display_patterns(self):
-        self.pattern_panel.SetBackgroundColour(wx.RED)
+        self.pattern_panel.SetBackgroundColour(wx.Colour(29, 48, 73))
 
+
+        self.pattern_selection_bitmaps = {}
+        def make_pattern_bundle(image):
+            bitmaps = []
+            for scale in (1, 1.5, 2):
+                scaled = image.resize((int(PATTERN_WIDTH * scale), int(PATTERN_HEIGHT * scale)), Image.NEAREST)
+                bitmaps.append(wx.Bitmap.FromBufferRGBA(*scaled.size, scaled.tobytes()))
+            return wx.BitmapBundle.FromBitmaps(bitmaps)
 
         for pattern_idx in (PATTERN_KEY_TO_NAME.keys()):
             if pattern_idx < 2:
@@ -6167,24 +6194,32 @@ class BannerSelector(wx.Frame):
             data = numpy.array(rgba_img)
 
 
-            background = Image.new('RGBA', img.size, (0, 0, 0, 255))
+            background = Image.new('RGBA', img.size, (19, 33, 52, 255))
             composite = Image.alpha_composite(background, rgba_img)
 
 
-            bmp = wx.Bitmap.FromBufferRGBA(*composite.size, numpy.array(composite))
+            bmp = make_pattern_bundle(composite)
+            selected_pixels = numpy.array(composite)
+            selected_pixels[:2, :, :] = (57, 255, 20, 255)
+            selected_pixels[-2:, :, :] = (57, 255, 20, 255)
+            selected_pixels[:, :2, :] = (57, 255, 20, 255)
+            selected_pixels[:, -2:, :] = (57, 255, 20, 255)
+            selected_bmp = make_pattern_bundle(Image.fromarray(selected_pixels))
+            self.pattern_selection_bitmaps[pattern_idx] = (bmp, selected_bmp)
 
 
             btn = wx.BitmapButton(
                 self.pattern_panel,
                 id=pattern_idx,
                 bitmap=bmp,
-                size=(PATTERN_WIDTH, PATTERN_HEIGHT)
+                size=self.FromDIP(wx.Size(PATTERN_WIDTH + 6, PATTERN_HEIGHT + 6))
             )
             btn.SetBackgroundColour(wx.BLACK)
             btn.SetToolTip(PATTERN_KEY_TO_NAME[pattern_idx][1])
             btn.Bind(wx.EVT_BUTTON, self.on_select_pattern)
-            self.pattern_sizer.Add(btn, 0, wx.ALL, 1)
+            self.pattern_sizer.Add(btn, 0)
 
+        self.pattern_panel.FitInside()
         self.pattern_panel.Layout()
         self.pattern_panel.Refresh()
 
@@ -6192,12 +6227,14 @@ class BannerSelector(wx.Frame):
 
         if self.selected_pattern_button:
             self.selected_pattern_button.SetBackgroundColour(wx.Colour(0, 0, 0))
+            self.selected_pattern_button.SetBitmap(self.pattern_selection_bitmaps[self.selected_pattern_index][0])
             self.selected_pattern_button.Refresh()
 
 
         self.selected_pattern_index = event.GetId()
         self.selected_pattern_button = event.GetEventObject()
-        self.selected_pattern_button.SetBackgroundColour(wx.Colour(255, 255, 0))
+        self.selected_pattern_button.SetBackgroundColour(wx.Colour(57, 255, 20))
+        self.selected_pattern_button.SetBitmap(self.pattern_selection_bitmaps[self.selected_pattern_index][1])
         self.selected_pattern_button.Refresh()
 
     def on_color_select(self, color_index):
@@ -6213,6 +6250,7 @@ class BannerSelector(wx.Frame):
 
             if self.selected_pattern_button:
                 self.selected_pattern_button.SetBackgroundColour(wx.Colour(0, 0, 0))
+                self.selected_pattern_button.SetBitmap(self.pattern_selection_bitmaps[self.selected_pattern_index][0])
                 self.selected_pattern_button.Refresh()
             self.selected_pattern_index = None
             self.selected_pattern_button = None
@@ -6246,7 +6284,7 @@ class BannerSelector(wx.Frame):
             preview = Image.alpha_composite(preview, colored_pattern)
 
 
-        wx_img = wx.Bitmap.FromBufferRGBA(PREVIEW_WIDTH, PREVIEW_HEIGHT, preview.tobytes())
+        wx_img = wx.Bitmap.FromBufferRGBA(*preview.size, preview.tobytes())
         self.preview_bitmap.SetBitmap(wx_img)
         self.nbt_output.SetValue(self.generate_bedrock_nbt())
         self.panel.Layout()
@@ -6304,6 +6342,7 @@ class BannerSelector(wx.Frame):
 
         if self.selected_pattern_button:
             self.selected_pattern_button.SetBackgroundColour(wx.Colour(0, 0, 0))
+            self.selected_pattern_button.SetBitmap(self.pattern_selection_bitmaps[self.selected_pattern_index][0])
             self.selected_pattern_button.Refresh()
             self.selected_pattern_index = None
             self.selected_pattern_button = None
