@@ -6378,7 +6378,7 @@ class BedrockNameTagAndLoreEditor(wx.Frame):
 
         main_sizer.Add(wx.StaticText(panel, label="Lore Editor:"), 0, wx.ALL, 5)
         self.lore_input = rt.RichTextCtrl(panel, style=wx.VSCROLL | wx.HSCROLL | wx.TE_MULTILINE | wx.NO_BORDER,
-                                          size=(-1, self.FromDIP(120)))
+                                          size=(-1, self.FromDIP(95)))
         self.lore_input.SetFont(wx.Font(12, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL))
         main_sizer.Add(self.lore_input, 0, wx.EXPAND | wx.ALL, 5)
 
@@ -6420,7 +6420,6 @@ class BedrockNameTagAndLoreEditor(wx.Frame):
         frame_sizer.Add(panel, 1, wx.EXPAND)
         self.SetSizer(frame_sizer)
         self.SetMinSize(self.FromDIP(wx.Size(510, 350)))
-        self.SetClientSize(self.FromDIP(wx.Size(700, 490)))
         if name:
             self.load_formatted_text(self.name_input, self.name)
         if lore:
@@ -6429,6 +6428,8 @@ class BedrockNameTagAndLoreEditor(wx.Frame):
                 self.lore_input.WriteText("\n")
 
         panel.SetupScrolling(scroll_x=False, scroll_y=True, rate_y=10)
+        content_height = main_sizer.CalcMin().height + self.FromDIP(12)
+        self.SetClientSize(wx.Size(self.FromDIP(575), max(content_height, self.FromDIP(325))))
         self.CentreOnParent()
         _clamp_window_to_display(self)
         self.Show()
@@ -6828,8 +6829,7 @@ class ItemTools:
 
         firework_data = current_nbt
 
-        frame = wx.Frame(_self, title="Edit Fireworks Explosions", size=(600, 400),
-                         style=_float_on_parent_style())
+        frame = wx.Frame(_self, title="Edit Fireworks Explosions", style=_float_on_parent_style())
         frame.Freeze()
 
         scroll_panel = wx.ScrolledWindow(frame, style=wx.VSCROLL)
@@ -6864,10 +6864,11 @@ class ItemTools:
             section_sizer = wx.BoxSizer(wx.VERTICAL)
             header = wx.BoxSizer(wx.HORIZONTAL)
 
-            header_label = wx.StaticText(parent_panel, label=f"{label} Colors:")
-            add_btn = wx.Button(parent_panel, label="+", size=(25, 25))
-            remove_btn = wx.Button(parent_panel, label="-", size=(25, 25))
+            header_label = wx.StaticText(parent_panel, label="Colors:" if label == "Color" else "Fade Colors:")
+            add_btn = wx.Button(parent_panel, label="+", size=frame.FromDIP(wx.Size(28, 28)))
+            remove_btn = wx.Button(parent_panel, label="-", size=frame.FromDIP(wx.Size(28, 28)))
             listbox = wx.ListBox(parent_panel, style=wx.LB_SINGLE)
+            listbox.SetMinSize(frame.FromDIP(wx.Size(175, 75)))
 
             def add_color(evt=None):
                 dlg = ColorChoiceDialog(parent_panel, label="Block")
@@ -7013,8 +7014,13 @@ class ItemTools:
             add_explosion()
 
         scroll_panel.Thaw()
+        frame.SetMinClientSize(frame.FromDIP(wx.Size(520, 230)))
+        content_height = main_sizer.CalcMin().height + frame.FromDIP(12)
+        client_height = min(max(content_height, frame.FromDIP(245)), frame.FromDIP(300))
+        frame.SetClientSize(wx.Size(frame.FromDIP(600), client_height))
         frame.Layout()
         frame.Centre()
+        _clamp_window_to_display(frame)
         frame.Thaw()
         frame.Show()
 
