@@ -5507,9 +5507,11 @@ class InventoryEditor(wx.Frame):
                             self.armor_tags[k] = v
             return item_name
 
-        def middle_slots(count, main=True, not_extra=True, target_sizer=None):
+        def middle_slots(count, main=True, not_extra=True, target_sizer=None, start=0, align_slots=False):
             target_sizer = target_sizer or self.grid_sizer
-            for i in range(count):
+            slot_flags = wx.ALL | wx.ALIGN_CENTER if align_slots else wx.TOP
+            slot_padding = _ui_metric(self, 2, 4) if align_slots else _ui_metric(self, 4, 6)
+            for i in range(start, start + count):
                 if i == 1 and not_extra:
                     if self._inventory_family_ui:
                         if self._main_inventory_ui:
@@ -5539,7 +5541,7 @@ class InventoryEditor(wx.Frame):
                     button.SetForegroundColour((0, 255, 0))
                     if self._inventory_family_ui:
                         button.SetBackgroundColour(wx.Colour(46, 46, 46))
-                    target_sizer.Add(button, 0, wx.TOP, _ui_metric(self, 4, 6))
+                    target_sizer.Add(button, 0, slot_flags, slot_padding)
                 elif i == 2 and main:
                     icon = self.resources.get_scaled_cache['ender_chest']
                     button = IconButton(self.scroll_panel, 'ender_chest', "Player EnderChest", 2000, icon, -201, self)
@@ -5548,7 +5550,7 @@ class InventoryEditor(wx.Frame):
                     button.SetName('EnderButton')
                     button.Bind(wx.EVT_BUTTON, self.ender_chest)
                     button.SetForegroundColour((0, 255, 0))
-                    target_sizer.Add(button, 0, wx.TOP, _ui_metric(self, 4, 6))
+                    target_sizer.Add(button, 0, slot_flags, slot_padding)
                 elif i == 3 and main:
                     icon = self.resources.get_scaled_cache.get('chest', wx.NullBitmap)
                     button = IconButton(self.scroll_panel, 'chest', "Preview Selected Container", 2000, icon, -202, self)
@@ -5559,7 +5561,7 @@ class InventoryEditor(wx.Frame):
                     button.SetToolTip("Preview a selected chest, copper chest, barrel, or shulker box")
                     button.button.SetToolTip("Preview a selected chest, copper chest, barrel, or shulker box")
                     button.SetForegroundColour((0, 255, 0))
-                    target_sizer.Add(button, 0, wx.TOP, _ui_metric(self, 4, 6))
+                    target_sizer.Add(button, 0, slot_flags, slot_padding)
                 else:
                     divider_line = wx.StaticLine(self.scroll_panel, style=wx.LI_HORIZONTAL)
                     target_sizer.Add(divider_line, 0, wx.TOP, _ui_metric(self, 4, 6))
@@ -5567,7 +5569,21 @@ class InventoryEditor(wx.Frame):
 
             self.grid_sizer = wx.BoxSizer(wx.VERTICAL)
             grid_gap = _ui_metric(self, 4, 10)
-            top_grid = wx.GridSizer(1, 9, grid_gap, grid_gap)
+            top_grid = wx.BoxSizer(wx.HORIZONTAL)
+
+            def equipment_group(label, columns):
+                group = wx.BoxSizer(wx.VERTICAL)
+                heading = wx.StaticText(self.scroll_panel, label=label)
+                heading.SetForegroundColour((0, 255, 0))
+                heading.SetFont(self.font)
+                group.Add(heading, 0, wx.ALIGN_CENTER | wx.BOTTOM, _ui_metric(self, 4, 8))
+                slots = wx.GridSizer(1, columns, 0, grid_gap)
+                group.Add(slots, 0, wx.ALIGN_CENTER)
+                return group, slots
+
+            armor_group, armor_grid = equipment_group('Armor', 4)
+            offhand_group, offhand_grid = equipment_group('Offhand', 1)
+            tools_group, tools_grid = equipment_group('Tools', 3)
             inventory_grid = wx.GridSizer(3, 9, grid_gap, grid_gap)
             hotbar_grid = wx.GridSizer(1, 9, grid_gap, grid_gap)
 
@@ -5582,11 +5598,11 @@ class InventoryEditor(wx.Frame):
                 button = IconButton(self.scroll_panel, item_name, display_name, count, icon_bitmap, i, self)
                 button.HideButtonValue()
                 button.Set_slot_map_key('Armor', i)
-                top_grid.Add(button, 0, wx.CENTRE | wx.ALL, _ui_metric(self, 2, 4))
+                armor_grid.Add(button, 0, wx.CENTRE | wx.ALL, _ui_metric(self, 2, 4))
                 self.slot_map[('Armor', i)] = button
                 armor_buttons.append(button)
 
-            middle_slots(4, target_sizer=top_grid)
+            middle_slots(3, target_sizer=tools_grid, start=1, align_slots=True)
 
             offhand_item = next((item for item in self.inventory.get('Offhand', [])), None)
             item_name = ((offhand_item["Name"].py_str[10:] if offhand_item["Name"].py_str.startswith("minecraft:") else offhand_item["Name"].py_str) if offhand_item and "Name" in offhand_item else '')
@@ -5602,7 +5618,7 @@ class InventoryEditor(wx.Frame):
             icon_bitmap = self.resources.get_scaled_cache.get(item_name)
             offhand_button = IconButton(self.scroll_panel, item_name, display_name, count, icon_bitmap, 0, self)
             offhand_button.SetBackgroundColour((0, 255, 0))
-            top_grid.Add(offhand_button, 0, wx.CENTRE | wx.ALL, _ui_metric(self, 2, 4))
+            offhand_grid.Add(offhand_button, 0, wx.CENTRE | wx.ALL, _ui_metric(self, 2, 4))
             self.slot_map[('Offhand', 0)] = offhand_button
             offhand_button.Set_slot_map_key('Offhand', 0)
 
@@ -5641,6 +5657,17 @@ class InventoryEditor(wx.Frame):
                 hotbar_grid.Add(button, 0, wx.ALL | wx.ALIGN_CENTER, _ui_metric(self, 2, 4))
                 self.slot_map[('Inventory', slot)] = button
                 button.Set_slot_map_key('Inventory', slot)
+
+            inventory_width = inventory_grid.GetMinSize().width
+            slot_width = (inventory_width - 8 * grid_gap) // 9
+            armor_group.SetMinSize((4 * slot_width + 3 * grid_gap, -1))
+            offhand_group.SetMinSize((2 * slot_width + grid_gap, -1))
+            tools_group.SetMinSize((3 * slot_width + 2 * grid_gap, -1))
+            top_grid.Add(armor_group, 0, wx.ALIGN_TOP)
+            top_grid.AddSpacer(grid_gap)
+            top_grid.Add(offhand_group, 0, wx.ALIGN_TOP)
+            top_grid.AddSpacer(grid_gap)
+            top_grid.Add(tools_group, 0, wx.ALIGN_TOP)
 
             outer_pad = _ui_metric(self, 4, 8)
             divider_pad = _ui_metric(self, 7, 12)
@@ -22991,12 +23018,12 @@ class Tools(wx.Frame):
 
         CustomToolTip(self, self._finder_replacer,
                       text="Find and replace blocks using the text fields.\n"
-                           "Applies changes directly from the editor.\n"
-                           "Uses the Helper tool to speed up block listing.",
+                           "Apply changes directly from the editor.\n"
+                           "Use the Helper tool to speed up block listing.",
                       font_size=14)
 
         CustomToolTip(self, self._portals_and_border_walls,
-                      text="Deletes portals, border walls, or items stored in containers.",
+                      text="Delete portals, border walls, or items stored in containers.",
                       font_size=14)
 
         CustomToolTip(self, self._player_inventory,
@@ -23008,11 +23035,11 @@ class Tools(wx.Frame):
                       font_size=14)
 
         CustomToolTip(self, self._material_counter,
-                      text="Lists blocks used within a selection.",
+                      text="Get a list of blocks used within a selection.",
                       font_size=14)
 
         CustomToolTip(self, self._shape_painter,
-                      text="Paints blocks using the Shape Painter tool. Some functions may be incomplete.",
+                      text="Paint blocks using the Shape Painter tool. Some functions may be incomplete.",
                       font_size=14)
 
         CustomToolTip(self, self._random_filler,
