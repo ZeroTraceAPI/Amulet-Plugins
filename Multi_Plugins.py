@@ -11040,7 +11040,7 @@ class SmallEditDialog(wx.Frame):
             self, parent, oper_name, tag_type_name, item, tree, bitmap_icon, image_map
     ):
         super(SmallEditDialog, self).__init__(
-            parent, title=f"{oper_name} {tag_type_name}", size=(400, 200)
+            parent, title=f"{oper_name} {tag_type_name}", size=(580, 280)
         )
         if bitmap_icon:
             if isinstance(bitmap_icon, wx.Icon):
@@ -11118,7 +11118,12 @@ class SmallEditDialog(wx.Frame):
             self.value_field.Bind(wx.EVT_KEY_UP, lambda evt:
             self.key_down_enter(evt, oper_name, self.data, item, tag_type_name))
             self.cancel_button.Bind(wx.EVT_BUTTON, lambda evt: self.Close())
+            content_size = main_panel.GetBestSize()
+            client_width = max(_ui_metric(self, 430, 560), content_size.width + self.FromDIP(16))
+            client_height = max(_ui_metric(self, 145, 240), content_size.height + self.FromDIP(12))
+            self.SetClientSize(wx.Size(client_width, client_height))
             self.Layout()
+            self.Centre(50)
         else:
             self.tree = tree
             self.SetSize(600, 700)
@@ -13435,7 +13440,6 @@ class ExportImportCostomDialog(wx.Dialog):
     def __init__(self, *args, **kw):
         super(ExportImportCostomDialog, self).__init__(*args, **kw)
         self.InitUI()
-        self.SetSize(500, 180)
 
     def InitUI(self, *ar):
         if len(ar) > 0:
@@ -13452,10 +13456,6 @@ class ExportImportCostomDialog(wx.Dialog):
         static_box = wx.StaticBox(panel)
         static_box_sizer = wx.StaticBoxSizer(static_box, orient=wx.VERTICAL)
         static_box.SetLabel('Select Export Type:')
-        image = wx.ArtProvider.GetBitmap(wx.ART_QUESTION)
-        image_placer = wx.BoxSizer(wx.HORIZONTAL)
-        self.bitmap = wx.StaticBitmap(self, -1, image, pos=(200, 20))
-        image_placer.Add(self.bitmap)
         self.selected_chunks = wx.RadioButton(panel, label='Selected Chunks .snbt list')
         self.all_chunks = wx.RadioButton(panel, label='ALL Chunks .snbt list')
         self.nbt_file_option = wx.RadioButton(panel, label='NBT Structure File')
@@ -13466,17 +13466,18 @@ class ExportImportCostomDialog(wx.Dialog):
         static_box_sizer.Add(self.all_entities_nbt)
         panel.SetSizer(static_box_sizer)
         hor_box = wx.BoxSizer(wx.HORIZONTAL)
-        self.okButton = wx.Button(self)
+        self.okButton = wx.Button(self, label=self.selected_chunks.GetLabel())
         self.selected_chunks.Bind(wx.EVT_RADIOBUTTON, self.setbuttonEL)
         self.all_chunks.Bind(wx.EVT_RADIOBUTTON, self.setbuttonEL)
         self.nbt_file_option.Bind(wx.EVT_RADIOBUTTON, self.setbuttonEL)
         self.all_entities_nbt.Bind(wx.EVT_RADIOBUTTON, self.setbuttonEL)
         closeButton = wx.Button(self, label='Cancel')
-        hor_box.Add(self.okButton)
-        hor_box.Add(closeButton, flag=wx.LEFT, border=5)
-        vert_box.Add(panel, proportion=1, flag=wx.ALL | wx.EXPAND, border=5)
-        vert_box.Add(hor_box, flag=wx.ALIGN_CENTER | wx.TOP | wx.BOTTOM, border=10)
+        hor_box.Add(self.okButton, 1, wx.EXPAND)
+        hor_box.Add(closeButton, 0, wx.LEFT, 8)
+        vert_box.Add(panel, proportion=0, flag=wx.ALL | wx.EXPAND, border=5)
+        vert_box.Add(hor_box, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
         self.SetSizer(vert_box)
+        self.Fit()
         self.okButton.Bind(wx.EVT_BUTTON, self.OnClose)
         closeButton.Bind(wx.EVT_BUTTON, self.OnCancelEX)
         self.Bind(wx.EVT_CLOSE, self.OnCancelEX)
@@ -13499,10 +13500,6 @@ class ExportImportCostomDialog(wx.Dialog):
         static_box = wx.StaticBox(panel)
         static_box.SetLabel('Select Import Type:')
         static_box_sizer = wx.StaticBoxSizer(static_box, orient=wx.VERTICAL)
-        image = wx.ArtProvider.GetBitmap(wx.ART_QUESTION)
-        image_placer = wx.BoxSizer(wx.HORIZONTAL)
-        self.bitmap = wx.StaticBitmap(self, -1, image, pos=(200, 20))
-        image_placer.Add(self.bitmap)
         self.list = wx.RadioButton(panel, label='A Entitie .snbt list to world')
         self.nbt_file = wx.RadioButton(panel, label='NBT Structure File')
         self.ms_file = wx.RadioButton(panel, label='Open and Add Entities to MCStructure File')
@@ -13513,16 +13510,21 @@ class ExportImportCostomDialog(wx.Dialog):
         static_box_sizer.Add(self.ms_file)
         panel.SetSizer(static_box_sizer)
         hor_box = wx.BoxSizer(wx.HORIZONTAL)
-        self.okButton = wx.Button(self)
+        self.okButton = wx.Button(self, label=self.list.GetLabel())
+        widest = max(self.okButton.GetTextExtent(option.GetLabel())[0] for option in (
+            self.list, self.nbt_file, self.ms_file
+        ))
+        self.okButton.SetMinSize((widest + self.FromDIP(30), -1))
         self.list.Bind(wx.EVT_RADIOBUTTON, self.setbuttonIM)
         self.nbt_file.Bind(wx.EVT_RADIOBUTTON, self.setbuttonIM)
         self.ms_file.Bind(wx.EVT_RADIOBUTTON, self.setbuttonIM)
         closeButton = wx.Button(self, label='Cancel')
-        hor_box.Add(self.okButton, flag=wx.TOP)
-        hor_box.Add(closeButton, flag=wx.LEFT, border=5)
-        vert_box.Add(panel, proportion=1, flag=wx.ALL | wx.EXPAND, border=5)
-        vert_box.Add(hor_box, flag=wx.ALIGN_CENTER | wx.TOP | wx.BOTTOM, border=10)
+        hor_box.Add(self.okButton, 1, wx.EXPAND)
+        hor_box.Add(closeButton, 0, wx.LEFT, 8)
+        vert_box.Add(panel, proportion=0, flag=wx.ALL | wx.EXPAND, border=5)
+        vert_box.Add(hor_box, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
         self.SetSizer(vert_box)
+        self.Fit()
         self.okButton.Bind(wx.EVT_BUTTON, self.OnClose)
         closeButton.Bind(wx.EVT_BUTTON, self.OnCancelIM)
         self.Bind(wx.EVT_CLOSE, self.OnCancelIM)
@@ -13530,15 +13532,9 @@ class ExportImportCostomDialog(wx.Dialog):
     def setbuttonIM(self, e):
         if self.list.GetValue():
             self.okButton.SetLabel(self.list.GetLabel())
-            self.okButton.SetSize(200, 23)
-            self.okButton.SetPosition(pt=(15, 87))
         if self.nbt_file.GetValue():
-            self.okButton.SetSize(200, 23)
-            self.okButton.SetPosition(pt=(15, 87))
             self.okButton.SetLabel(self.nbt_file.GetLabel())
         if self.ms_file.GetValue():
-            self.okButton.SetSize(250, 23)
-            self.okButton.SetPosition(pt=(15, 87))
             self.okButton.SetLabel(self.ms_file.GetLabel())
 
     def OnClose(self, e):
