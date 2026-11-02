@@ -7028,6 +7028,32 @@ class ColorChoiceDialog(wx.Dialog):
         if self.selected_index is not None:
             return COLOR_NAMES[self.selected_index]
         return None
+_VANILLA_DURABLE_ITEMS = frozenset((
+    'bow', 'crossbow', 'trident', 'mace', 'shield', 'elytra', 'turtle_helmet',
+    'wolf_armor', 'fishing_rod', 'shears', 'flint_and_steel', 'brush',
+    'carrot_on_a_stick', 'warped_fungus_on_a_stick'
+))
+_VANILLA_DURABLE_EQUIPMENT = re.compile(
+    r'(?:wooden|stone|copper|iron|golden|diamond|netherite)_(?:sword|pickaxe|axe|shovel|hoe|spear)'
+    r'|(?:leather|chainmail|copper|iron|golden|diamond|netherite)_(?:helmet|chestplate|leggings|boots)'
+)
+
+def _item_has_durability(item, resources):
+    item_id = getattr(item.get('Name'), 'py_str', '')
+    if not isinstance(item_id, str) or not item_id:
+        return False
+    if ':' in item_id:
+        namespace, local_name = item_id.split(':', 1)
+        if namespace != 'minecraft':
+            definition = resources.get_custom_item_definition(item_id)
+            return (isinstance(definition, dict)
+                    and type(definition.get('max_durability')) is int
+                    and definition['max_durability'] > 0)
+    else:
+        local_name = item_id
+    return (local_name in _VANILLA_DURABLE_ITEMS
+            or _VANILLA_DURABLE_EQUIPMENT.fullmatch(local_name) is not None)
+
 class ItemTools:
     def __init__(self, parent):
         self.parent = parent
@@ -7088,6 +7114,18 @@ class ItemTools:
 
         _self.Layout()
         _self.Refresh()
+
+    def restore_full_durability(self, _self):
+        keys = _self.editor.keys + list(_self.Get_slot_map_key())
+        item = _self.editor.selected_player[keys]
+        if not _item_has_durability(item, _self.editor.resources):
+            return
+        tag = item.get('tag')
+        if not isinstance(tag, CompoundTag):
+            return
+        damage = tag.get('Damage')
+        if isinstance(damage, (ByteTag, ShortTag, IntTag, LongTag)) and damage.py_int > 0:
+            tag['Damage'] = type(damage)(0)
 
     def make_unbreakable(self, _self):
         keys = _self.editor.keys + list(_self.Get_slot_map_key())
@@ -8289,24 +8327,19 @@ class IconButton(wx.Panel):
             menu.Append(enchant_item)
             self.Bind(wx.EVT_MENU, lambda e, _self=self: self.tools.edit_enchants(_self), enchant_item)
 
-            custom_definition = self.editor.resources.get_custom_item_definition(item_name)
-            custom_durable = (custom_definition is not None
-                              and (custom_definition.get('max_durability') is not None
-                                   or 'Unbreakable' in last_data.get('tag', {})))
-            vanilla_durable = (custom_definition is None and (':' not in item_name or item_name.startswith('minecraft:'))
-                               and any(t in item_name for t in [
-                "pickaxe", "axe", "shovel", "hoe", "trident", "spear",
-                "helmet", "leggings", "chestplate", "boots",
-                "chainmail", "sword", "elytra", "mace", "brush", "bow", 'shield',
-                "fishing_rod", "shears", "flint_and_steel",
-                "carrot_on_a_stick", "warped_fungus_on_a_stick"
-            ]))
-            if custom_durable or vanilla_durable:
-                unbreakable_text = 'Make Breakable' if last_data.get('tag', {}).get('Unbreakable',
-                                                                                    False) else 'Make Unbreakable'
+            if _item_has_durability(last_data, self.editor.resources):
+                unbreakable_text = ('Make Breakable' if last_data.get('tag', {}).get('Unbreakable', False)
+                                    else 'Make Unbreakable')
                 unbreakable_item = wx.MenuItem(menu, wx.ID_ANY, unbreakable_text)
                 menu.Append(unbreakable_item)
                 self.Bind(wx.EVT_MENU, lambda e, _self=self: self.tools.make_unbreakable(_self), unbreakable_item)
+
+                repair_item = wx.MenuItem(menu, wx.ID_ANY, 'Restore Full Durability')
+                menu.Append(repair_item)
+                damage = last_data.get('tag', {}).get('Damage')
+                repair_item.Enable(isinstance(damage, (ByteTag, ShortTag, IntTag, LongTag))
+                                   and damage.py_int > 0)
+                self.Bind(wx.EVT_MENU, lambda e, _self=self: self.tools.restore_full_durability(_self), repair_item)
 
             if 'firework' in self.button.GetName():
                 fireworks_item = wx.MenuItem(menu, wx.ID_ANY, "Edit Fireworks")
