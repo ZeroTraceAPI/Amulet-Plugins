@@ -21199,7 +21199,13 @@ class SetPlayersData(wx.Frame):
         }
         facing, looking = pdata.get("Rotation")
         if self.platform == "bedrock":
-            pdata["PlayerGameMode"] = TAG_Int(int(self.listRadio.get(mode)))
+            player_mode = int(self.listRadio.get(mode))
+            abilities = pdata["abilities"]
+            pdata["PlayerGameMode"] = TAG_Int(player_mode)
+            for name in ("instabuild", "invulnerable", "mayfly"):
+                abilities[name] = ByteTag(player_mode)
+            if player_mode == 0:
+                abilities["flying"] = ByteTag(0)
 
         pdata["DimensionId"] = TAG_Int(int(self.dim.GetSelection()))
         pdata["Rotation"] = TAG_List()
