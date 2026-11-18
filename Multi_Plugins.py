@@ -2764,6 +2764,48 @@ def _inventory_atlas_item_id(item, atlas):
     return item_name
 
 
+_EQUIPMENT_SWAP_GROUPS = (
+    ('Armor', ('Helmets', 'Chestplates', 'Leggings', 'Boots', 'Horse_Armor', 'Nautilus_Armor')),
+    ('Combat', ('Swords', 'Spears')),
+    ('Tools & Utilities', ('Pickaxes', 'Axes', 'Shovels', 'Hoes')),
+)
+
+
+def _equipment_swap_options(item, atlas):
+    """Lists replacements in the same supported vanilla equipment family."""
+    if not item:
+        return None, ()
+    name = getattr(item.get('Name'), 'py_str', '')
+    if not isinstance(name, str) or not name.startswith('minecraft:'):
+        return None, ()
+    current_id = name[len('minecraft:'):]
+    for group, subgroups in _EQUIPMENT_SWAP_GROUPS:
+        for subgroup in subgroups:
+            family = SLOT_MENU_CATEGORIES[group][subgroup]
+            if current_id in family:
+                return subgroup.replace('_', ' '), tuple(
+                    item_id for item_id in family
+                    if item_id != current_id and item_id in atlas
+                )
+    return None, ()
+
+
+def _equipment_swap_data(item, item_id):
+    """Preserves item data and resets durability for equipment that wears down."""
+    result = copy.deepcopy(item)
+    result['Name'] = StringTag('minecraft:' + item_id)
+    damage = result.get('Damage')
+    result['Damage'] = type(damage)(0) if isinstance(
+        damage, (ByteTag, ShortTag, IntTag, LongTag)
+    ) else ShortTag(0)
+    tag = result.get('tag')
+    if isinstance(tag, CompoundTag) and not item_id.endswith(('_horse_armor', '_nautilus_armor')):
+        wear = tag.get('Damage')
+        if isinstance(wear, (ByteTag, ShortTag, IntTag, LongTag)):
+            tag['Damage'] = type(wear)(0)
+    return result
+
+
 def _inventory_item_index(items, slot, path):
     """Resolves fixed equipment positions or a dynamic inventory Slot tag.
 
@@ -2775,6 +2817,26 @@ def _inventory_item_index(items, slot, path):
     return next(
         (index for index, item in enumerate(items)
          if item.get('Slot', IntTag(-99)).py_int == slot), None)
+
+
+def _inventory_clear_slot(items, slot, path):
+    """Removes a dynamic item or empties a fixed equipment position."""
+    if len(path) == 1 and path[0] in ('Armor', 'Offhand'):
+        if not 0 <= slot < len(items):
+            return
+        old = items[slot]
+        empty = CompoundTag({
+            'Name': StringTag(''), 'Count': ByteTag(0), 'Damage': ShortTag(0)
+        })
+        if isinstance(old, CompoundTag) and isinstance(old.get('Slot'), ByteTag):
+            empty['Slot'] = copy.deepcopy(old['Slot'])
+        items[slot] = empty
+    else:
+        for index in range(len(items) - 1, -1, -1):
+            item = items[index]
+            if (isinstance(item, CompoundTag)
+                    and getattr(item.get('Slot'), 'py_int', None) == slot):
+                items.pop(index)
 
 
 def _inventory_drop_slot_at(screen_point, source):
@@ -3999,6 +4061,8 @@ class IconResources:
     def toggle_catalog(self, parent, data, slot):
         """Toggles the Catalog while tolerating destroyed native wx windows."""
         window = self._get_catalog_window()
+        if window is not None:
+            window.end_equipment_change()
         if window is None:
             window = self.open_catalog(parent, data, slot)
             # Keeps the historical near-mouse placement used by slot menu opens.
@@ -5587,14 +5651,10 @@ class InventoryEditor(wx.Frame):
 
     def on_clear_all(self, event):
         for x in self.slot_map.values():
-            x.button.SetName('Empty')
-            x.button.SetBitmap(wx.NullBitmap)
-            x.button.SetToolTip('Empty')
-            x.SetValue(0)
-            current = self.keys + list(x.Get_slot_map_key())
-            self.selected_player[current]['Name'] = StringTag('')
-            self.selected_player[current]['tag'] = CompoundTag({})
-            self.selected_player[current]['Damage'] = ShortTag(0)
+            key, slot = x.Get_slot_map_key()
+            path = self.keys + [key]
+            _inventory_clear_slot(self.selected_player[path], slot, path)
+            x.delete_slot()
         self.Refresh()
 
     def set_selected_slot(self, selected):
@@ -5627,10 +5687,12 @@ class InventoryEditor(wx.Frame):
             current_keys = self.keys + [key]
             current = self.selected_player[current_keys]
             # Root Armor / Offhand arrays use positions; other lists use Slot tags.
+            if x.button.GetName() == 'Empty' or x.GetValue().py_int == 0:
+                _inventory_clear_slot(current, slot, current_keys)
+                x.delete_slot()
+                continue
             item_index = _inventory_item_index(current, slot, current_keys)
-
             if item_index is None:
-
                 continue
 
             # Matches banner colour identifiers when updating the inventory.
@@ -5644,9 +5706,6 @@ class InventoryEditor(wx.Frame):
                         current[item_index]['Damage'] = ShortTag(key_val)
                         current[item_index]['Name'] = StringTag(item_name.replace(color+"_", ""))
             current[item_index]['Count'] = x.GetValue()
-
-            if x.GetValue().py_int == 0:
-                current[item_index]['Name'] = StringTag('')
 
         self.selected_player.save_player()
 
@@ -6221,6 +6280,9 @@ class IconListCtrl(wx.Frame):
         self.all_items = []
         self.custom_items = []
         self.custom_item_ids = set()
+        self.equipment_target = None
+        self.equipment_choices = ()
+        self._equipment_previous_view = None
 
         panel_sizer = wx.BoxSizer(wx.VERTICAL)
         panel_horz = wx.BoxSizer(wx.HORIZONTAL)
@@ -6334,6 +6396,36 @@ class IconListCtrl(wx.Frame):
         if drag_image is not None and event.Dragging() and event.LeftIsDown():
             drag_image.Move(event.GetPosition())
 
+    def begin_equipment_change(self, target, family, choices):
+        """Filters the Catalog to the selected equipment's replacement family."""
+        self._end_catalog_drag(cancel=True)
+        if self.equipment_target is None:
+            self._equipment_previous_view = (
+                self.item_category.GetSelection(), self.filterstring.GetValue()
+            )
+        self.equipment_target = target
+        self.equipment_choices = frozenset(choices)
+        self.item_category.SetSelection(0)
+        self.item_category.Enable(False)
+        self.filterstring.ChangeValue('')
+        self.SetTitle(f'Change Equipment / {family}')
+        self.show_filtered_items()
+
+    def end_equipment_change(self):
+        """Restores the regular Catalog after an equipment selection or cancellation."""
+        if self.equipment_target is None:
+            return
+        self.equipment_target = None
+        self.equipment_choices = ()
+        previous_view = self._equipment_previous_view
+        self._equipment_previous_view = None
+        self.item_category.Enable(True)
+        self.SetTitle('Catalog')
+        if previous_view is not None:
+            self.item_category.SetSelection(previous_view[0])
+            self.filterstring.ChangeValue(previous_view[1])
+        self.show_filtered_items(self.filterstring.GetValue())
+
     def OnMouseDown(self, event):
         pos = event.GetPosition()
         index = self.list_ctrl.HitTest(pos)[0]
@@ -6342,6 +6434,12 @@ class IconListCtrl(wx.Frame):
 
         bedrock_id = self.index_to_bedrock.get(index)
         if not bedrock_id:
+            return
+        if self.equipment_target is not None:
+            if (bedrock_id in self.equipment_choices
+                    and self.equipment_target.replace_equipment(bedrock_id)):
+                self.end_equipment_change()
+                self.Hide()
             return
         image_index = self.list_ctrl.GetItem(index).GetImage()
         bmp = self.image_list.GetBitmap(image_index)
@@ -6417,6 +6515,7 @@ class IconListCtrl(wx.Frame):
 
     def on_close(self, event):
         self._end_catalog_drag(cancel=True)
+        self.end_equipment_change()
         # Keeps the Catalog reusable while its owning InventoryEditor remains alive.
         try:
             self.HideWithEffect(effect=wx.SHOW_EFFECT_BLEND)
@@ -6535,6 +6634,8 @@ class IconListCtrl(wx.Frame):
         self.index_to_bedrock.clear()
         filter_text = filter_text.lower()
         items = self.custom_items if self.item_category.GetSelection() == 1 else self.all_items
+        if self.equipment_target is not None:
+            items = (item for item in self.all_items if item[0] in self.equipment_choices)
 
         for bedrock_id, display_name, icon_index in items:
             if not filter_text or filter_text in display_name.lower() or filter_text in bedrock_id.lower():
@@ -7387,19 +7488,10 @@ class ItemTools:
         _self.Refresh()
 
     def delete_slot(self, _self):
-        _self.bedrock_id = ''
-
-        _self.button.SetName('Empty')
-        _self.clear_bitmap()
-        _self.SetBitmap(wx.NullBitmap, "Empty")
-        _self.count_box.SetValue("0")
-        if not isinstance(_self.editor.selected_player, SelectedContainerStaging):
-            _self.Close()
-        _self.Layout()
-        _self.Refresh()
-
-        _self.Layout()
-        _self.Refresh()
+        key, slot = _self.Get_slot_map_key()
+        path = _self.editor.keys + [key]
+        _inventory_clear_slot(_self.editor.selected_player[path], slot, path)
+        _self.delete_slot()
 
     def restore_full_durability(self, _self):
         """Restores a damageable item's durability without changing its other NBT."""
@@ -8666,6 +8758,14 @@ class IconButton(wx.Panel):
                     container_item
                 )
 
+            family, choices = _equipment_swap_options(
+                last_data, self.editor.resources.get_json_data
+            )
+            if choices:
+                equipment_item = wx.MenuItem(menu, wx.ID_ANY, 'Change Equipment')
+                menu.Append(equipment_item)
+                self.Bind(wx.EVT_MENU, lambda e: self.open_equipment_change(), equipment_item)
+
             # Every occupied item can use the enchantment editor.
             enchant_item = wx.MenuItem(menu, wx.ID_ANY, "Edit Enchants")
             menu.Append(enchant_item)
@@ -8717,6 +8817,54 @@ class IconButton(wx.Panel):
         finally:
             menu.Destroy()
             wx.CallAfter(self._restore_slot_after_popup, button)
+    def open_equipment_change(self):
+        """Opens the Catalog for replacements of the selected equipment."""
+        key, slot = self.Get_slot_map_key()
+        path = self.editor.keys + [key]
+        items = self.editor.selected_player[path]
+        index = _inventory_item_index(items, slot, path)
+        if index is None:
+            return
+        family, choices = _equipment_swap_options(
+            items[index], self.editor.resources.get_json_data
+        )
+        if choices:
+            catalog = self.editor.resources.open_catalog(
+                self.editor, self.editor, self.Get_slot_map_key()
+            )
+            catalog.begin_equipment_change(self, family, choices)
+
+    def replace_equipment(self, item_id):
+        """Changes the selected item's material while retaining its other NBT."""
+        key, slot = self.Get_slot_map_key()
+        path = self.editor.keys + [key]
+        if self.editor.slot_map.get((key, slot)) is not self:
+            return False
+        items = self.editor.selected_player[path]
+        index = _inventory_item_index(items, slot, path)
+        if index is None:
+            return False
+        _, choices = _equipment_swap_options(
+            items[index], self.editor.resources.get_json_data
+        )
+        if item_id not in choices:
+            return False
+        bitmap = self.editor.resources.get_scaled_cache.get(item_id)
+        if bitmap is None or not bitmap.IsOk():
+            return False
+        new_item = _equipment_swap_data(items[index], item_id)
+        items[index] = new_item
+        label = self.editor.resources.get(item_id, {}).get('display_name', item_id)
+        self.SetLabelText(item_id)
+        self.SetTagData(new_item)
+        self.icon_bitmap = bitmap
+        self.button.SetName(item_id)
+        self.SetBitmap(bitmap, label)
+        self.button.SetLabel('')
+        self.Layout()
+        self.Refresh()
+        return True
+
     def on_left_click(self, event):
         # A source can lose its left-up to another slot. Whichever slot gets
         # the release uses the same source-owned finalizer as the timer.
@@ -8896,7 +9044,6 @@ class IconButton(wx.Panel):
             "Slot": ByteTag(self.slot),
             "tag": CompoundTag({})
         })
-        self.append = False
         # Checks if this is a container-type item (like a bundle)
         if custom_definition is None and any(keyword in bedrock_id for keyword in CONTAINERS):
 
@@ -8920,25 +9067,10 @@ class IconButton(wx.Panel):
 
             self.tag_data['tag'] = tag_data
 
-        # Custom item replacement uses Slot tags, including sparse lists.
-        if custom_definition is not None:
-            item_index = _inventory_item_index(nbt, self.slot, self.editor.keys + [key])
-            if item_index is None:
-                slot = None
-                self.append = True
-            else:
-                slot = item_index
-        elif any(container_type in self.title for container_type in CONTAINER_TYPES):
-            slot = None
-            if len(nbt) > 0:
-                for i, item in enumerate(nbt):
-                    if item['Slot'].py_int == self.slot:
-                        slot = i
-                        break
-                if slot is None:
-                    self.append = True
-            else:
-                self.append = True
+        path = self.editor.keys + [key]
+        item_index = _inventory_item_index(nbt, self.slot, path)
+        if item_index is None and len(path) == 1 and key in ('Armor', 'Offhand'):
+            return
 
         ctrl_down = wx.GetKeyState(wx.WXK_CONTROL)
         shift_down = wx.GetKeyState(wx.WXK_SHIFT)
@@ -8952,12 +9084,10 @@ class IconButton(wx.Panel):
             self.tag_data['Count'] = ByteTag(1)
         if custom_definition is None and any(word in self.tag_data['Name'].py_str for word in ("boat", "minecart")):
             self.tag_data.pop('tag', None)
-        keys = self.editor.keys + [ key, slot]
-
-        if self.append:
-            self.editor.selected_player[keys[:-1]].append(self.tag_data)
+        if item_index is None:
+            nbt.append(self.tag_data)
         else:
-            self.editor.selected_player[keys] = self.tag_data
+            nbt[item_index] = self.tag_data
 #
         icon_cache = self.editor.resources.get_scaled_cache
         if custom_definition is not None:
@@ -9299,11 +9429,14 @@ class IconButton(wx.Panel):
         self.count_box.Hide()
 
     def delete_slot(self):
-        self.bedrock_id = ''
+        self.SetLabelText('')
+        self.SetTagData(None)
+        self.icon_bitmap = None
         self.button.SetName('Empty')
+        self.button.SetLabel('')
         self.clear_bitmap()
-        self.SetBitmap(wx.NullBitmap, "Empty")
-        self.count_box.SetValue("0")
+        self.SetBitmap(wx.NullBitmap, 'Empty')
+        self.count_box.SetValue('0')
         self.Layout()
         self.Refresh()
 
