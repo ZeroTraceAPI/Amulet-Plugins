@@ -2730,6 +2730,8 @@ def _inventory_atlas_item_id(item, atlas):
         return ''
     full_name = item['Name'].py_str
     item_name = full_name[10:] if full_name.startswith('minecraft:') else full_name
+    if full_name == 'minecraft:magma' and 'magma' not in atlas and 'magma_block' in atlas:
+        return 'magma_block'
     damage = getattr(item.get('Damage'), 'py_int', 0)
     if full_name.startswith('minecraft:') and item_name == 'banner':
         return f'{color_dict.get(damage, "white")}_{item_name}'
