@@ -2739,6 +2739,28 @@ INPUT_SIZES = {
 CLIP_BOARD = {}
 
 
+_INVENTORY_DAMAGE_VARIANT_ITEMS = frozenset((
+    'firework_star', 'bed', 'splash_potion', 'lingering_potion', 'potion',
+    'ominous_bottle', 'goat_horn', 'arrow',
+))
+
+
+def _inventory_atlas_item_id(item, atlas):
+    """Resolves saved Bedrock item values to their inventory atlas identifiers."""
+    if not item or 'Name' not in item:
+        return ''
+    full_name = item['Name'].py_str
+    item_name = full_name[10:] if full_name.startswith('minecraft:') else full_name
+    damage = getattr(item.get('Damage'), 'py_int', 0)
+    if full_name.startswith('minecraft:') and item_name == 'banner':
+        return f'{color_dict.get(damage, "white")}_{item_name}'
+    if full_name.startswith('minecraft:') and item_name in _INVENTORY_DAMAGE_VARIANT_ITEMS:
+        variant_name = f'{item_name}:{damage}'
+        if damage != 0 or variant_name in atlas or item_name not in atlas:
+            return variant_name
+    return item_name
+
+
 def _inventory_item_index(items, slot, path):
     """Resolves fixed equipment positions or a dynamic inventory Slot tag.
 
@@ -5369,7 +5391,7 @@ class InventoryEditor(wx.Frame):
             self.Bind(wx.EVT_DPI_CHANGED, self._on_display_metrics_changed)
 
     def _fit_inventory_window(self):
-        """Fits to current content and continuously interpolate explicit UI metrics."""
+        """Fits current content and continuously interpolates explicit UI metrics."""
         try:
             self.Layout()
             self.scroll_panel.Layout()
@@ -5651,8 +5673,6 @@ class InventoryEditor(wx.Frame):
         self.grid_sizer.Clear(delete_windows=False)
 
         armor_buttons = []
-        data_damage_tag_list_of = ['firework_star', 'bed', 'splash_potion', 'lingering_potion', 'potion',
-                                   'ominous_bottle', 'goat_horn', 'arrow']
 
         def more_display_info(display_name, item):
             if not item:
@@ -5694,24 +5714,11 @@ class InventoryEditor(wx.Frame):
             return display_name or "Empty"
 
         def processes_item_iter_next(item):
-            item_name = ''
-            if item and "Name" in item:
-                full_name = item["Name"].py_str
-                item_name = full_name[10:] if full_name.startswith("minecraft:") else full_name
-                damage = getattr(item.get('Damage'), 'py_int', 0)
-                if full_name.startswith('minecraft:') and item_name == 'banner':
-                    item_name = f'{color_dict.get(damage, "white")}_{item_name}'
-                elif full_name.startswith('minecraft:') and item_name in data_damage_tag_list_of:
-                    variant_name = f"{item_name}:{damage}"
-                    # Some default Damage=0 items use the base atlas ID, not :0.
-                    if (damage != 0 or variant_name in self.resources.get_json_data
-                            or item_name not in self.resources.get_json_data):
-                        item_name = variant_name
-
-                if item.get('tag'):
-                    for k, v in item['tag'].items():
-                        if '_' in item_name and item_name.split('_')[0] in self.armor_types:
-                            self.armor_tags[k] = v
+            item_name = _inventory_atlas_item_id(item, self.resources.get_json_data)
+            if item and item.get('tag'):
+                for k, v in item['tag'].items():
+                    if '_' in item_name and item_name.split('_')[0] in self.armor_types:
+                        self.armor_tags[k] = v
             return item_name
 
         def middle_slots(count, main=True, not_extra=True, target_sizer=None, start=0, align_slots=False):
@@ -5821,13 +5828,7 @@ class InventoryEditor(wx.Frame):
             middle_slots(3, target_sizer=tools_grid, start=1, align_slots=True)
 
             offhand_item = next((item for item in self.inventory.get('Offhand', [])), None)
-            item_name = ((offhand_item["Name"].py_str[10:] if offhand_item["Name"].py_str.startswith("minecraft:") else offhand_item["Name"].py_str) if offhand_item and "Name" in offhand_item else '')
-            if item_name == 'arrow':
-                damage_tag = offhand_item.get('Damage', None)
-                damage = getattr(damage_tag, 'py_int', damage_tag)
-                variant_name = f'arrow:{damage}'
-                if variant_name in self.resources.get_json_data:
-                    item_name = variant_name
+            item_name = _inventory_atlas_item_id(offhand_item, self.resources.get_json_data)
             display_name = self.resources.get(item_name, {}).get("display_name", "Empty")
             display_name = more_display_info(display_name, offhand_item)
             count = offhand_item.get("Count", 1) if offhand_item else 0
@@ -6183,7 +6184,7 @@ class IconListCtrl(wx.Frame):
         self.SetFont(self.font)
         # Matches the ImageList cell size to each inserted bitmap's logical size.
         # Catalog artwork is calibrated separately from the surrounding cell
-        # geometry.  Keep the 100% icon modest, add a small midpoint increase,
+        # geometry. Keep the 100% icon modest, add a small midpoint increase,
         # and give the 225% endpoint enough artwork to remain visually balanced
         # with the larger native text without changing atlas data.
         self.icon_size = _ui_metric_three(self, 68, 76, 104)
@@ -6192,12 +6193,12 @@ class IconListCtrl(wx.Frame):
         self.list_ctrl.SetFont(self.item_font)
         self.image_list = wx.ImageList(self.icon_size, self.icon_size)
         self.list_ctrl.AssignImageList(self.image_list, wx.IMAGE_LIST_NORMAL)
-        # Keeps label cells visually consistent as Windows DPI increases.  The
+        # Keeps label cells visually consistent as Windows DPI increases. The
         # ImageList and every bitmap placed in it now use the same calibrated
         # logical dimensions, so higher-DPI Catalogs get larger artwork without
         # relying on native bitmap-scale metadata.
         self._set_catalog_icon_spacing(
-            # Five columns fit cleanly at all three calibrated displays.  The
+            # Five columns fit cleanly at all three calibrated displays. The
             # 1080p endpoint needs slightly narrower cells; 1440p / 150% and
             # 4K / 225% already had good label room, so keep those nearly intact.
             _ui_metric_three(self, 178, 205, 260),
@@ -6284,7 +6285,7 @@ class IconListCtrl(wx.Frame):
 
     def _size_catalog_filter_controls(self, button_width, search_width):
         """Matches Filter / search heights using their font-aware native best size."""
-        # Best-size values are font- and platform-dependent.  Recompute them
+        # Best-size values are font- and platform-dependent. Recompute them
         # after applying the Catalog font, then use the larger native height so
         # the adjacent controls stay aligned without hard-coding a DPI height.
         for control in (self.button, self.filterstring):
@@ -7360,9 +7361,8 @@ class ItemTools:
 
         new_tag = copy.deepcopy(copied_item)
         new_tag['Slot'] = ByteTag(slot_number)
-        original_name = getattr(new_tag.get('Name'), 'py_str', '')
-        bedrock_id = original_name[10:] if original_name.startswith('minecraft:') else original_name
         resources = _self.editor.resources
+        bedrock_id = _inventory_atlas_item_id(new_tag, resources.get_json_data)
         metadata = resources.get(bedrock_id, {}) or {}
         display_name = metadata.get('display_name') or bedrock_id or 'Unknown Item (No Name)'
         icon = resources.get_scaled_cache.get(bedrock_id)
@@ -8570,7 +8570,7 @@ class IconButton(wx.Panel):
                 CLIP_BOARD.clear()
 
     def _release_inventory_drag(self):
-        """Ends preview, then commit a single validated release-point transfer."""
+        """Ends the preview, then commits one validated release-point transfer."""
         if CLIP_BOARD.get('SOURCE_SELF') is not self or self.drag_image is None:
             self._finish_drag_visual()
             return
@@ -9140,7 +9140,7 @@ class IconButton(wx.Panel):
                 print(f"Skipping {group_name}: unsupported type {type(group_data)}")
 
     def _populate_menu_with_ranges(self, menu, id_ranges, subgroup=None):
-        """Resolves, sort, group, and add items to a small popup menu."""
+        """Resolves, sorts, groups, and adds items to a compact popup menu."""
         item_names = self._resolve_menu_refs(id_ranges)
         subgroup = subgroup or ''
 
@@ -10063,7 +10063,7 @@ class ResetVaults():
         self.progress = ProgressBar()
 
     def reset_vaults(self):
-        """Resets vault reward tracking and report incomplete chunk operations."""
+        """Resets vault reward tracking and reports incomplete chunk operations."""
         # Retain the coordinates for the progress count and the actual scan.
         chunks = list(self.world.all_chunk_coords(self.canvas.dimension))
         total = len(chunks)
@@ -17376,7 +17376,7 @@ class UniqueObjectDict:
         return self.get(key)
 
     def __setitem__(self, key, value):
-        """Adds or update the dictionary object using index-style access."""
+        """Adds or updates the dictionary object using index-style access."""
         self.add(key, value)
 
     def __delitem__(self, key):
@@ -20001,7 +20001,7 @@ class FinderReplacer(wx.Frame):
         self.gsizer_but_and_chk.Add(self.set_max_found_input, 0, wx.LEFT, 0)
 
         self.top_layer_two.Add(self.gsizer_but_and_chk, 0, wx.TOP, 0)
-        # These must not be GridSizers.  GridSizer gives every row the height
+        # These must not be GridSizers. GridSizer gives every row the height
         # of the multiline editors, which made the tiny label rows consume
         # large blank areas at high DPI.
         label_gap = self.FromDIP(3)

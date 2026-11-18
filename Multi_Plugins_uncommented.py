@@ -2719,6 +2719,27 @@ INPUT_SIZES = {
 CLIP_BOARD = {}
 
 
+_INVENTORY_DAMAGE_VARIANT_ITEMS = frozenset((
+    'firework_star', 'bed', 'splash_potion', 'lingering_potion', 'potion',
+    'ominous_bottle', 'goat_horn', 'arrow',
+))
+
+
+def _inventory_atlas_item_id(item, atlas):
+    if not item or 'Name' not in item:
+        return ''
+    full_name = item['Name'].py_str
+    item_name = full_name[10:] if full_name.startswith('minecraft:') else full_name
+    damage = getattr(item.get('Damage'), 'py_int', 0)
+    if full_name.startswith('minecraft:') and item_name == 'banner':
+        return f'{color_dict.get(damage, "white")}_{item_name}'
+    if full_name.startswith('minecraft:') and item_name in _INVENTORY_DAMAGE_VARIANT_ITEMS:
+        variant_name = f'{item_name}:{damage}'
+        if damage != 0 or variant_name in atlas or item_name not in atlas:
+            return variant_name
+    return item_name
+
+
 def _inventory_item_index(items, slot, path):
     if len(path) == 1 and path[0] in ('Armor', 'Offhand'):
         return slot if 0 <= slot < len(items) else None
@@ -5474,8 +5495,6 @@ class InventoryEditor(wx.Frame):
         self.grid_sizer.Clear(delete_windows=False)
 
         armor_buttons = []
-        data_damage_tag_list_of = ['firework_star', 'bed', 'splash_potion', 'lingering_potion', 'potion',
-                                   'ominous_bottle', 'goat_horn', 'arrow']
 
         def more_display_info(display_name, item):
             if not item:
@@ -5517,24 +5536,11 @@ class InventoryEditor(wx.Frame):
             return display_name or "Empty"
 
         def processes_item_iter_next(item):
-            item_name = ''
-            if item and "Name" in item:
-                full_name = item["Name"].py_str
-                item_name = full_name[10:] if full_name.startswith("minecraft:") else full_name
-                damage = getattr(item.get('Damage'), 'py_int', 0)
-                if full_name.startswith('minecraft:') and item_name == 'banner':
-                    item_name = f'{color_dict.get(damage, "white")}_{item_name}'
-                elif full_name.startswith('minecraft:') and item_name in data_damage_tag_list_of:
-                    variant_name = f"{item_name}:{damage}"
-
-                    if (damage != 0 or variant_name in self.resources.get_json_data
-                            or item_name not in self.resources.get_json_data):
-                        item_name = variant_name
-
-                if item.get('tag'):
-                    for k, v in item['tag'].items():
-                        if '_' in item_name and item_name.split('_')[0] in self.armor_types:
-                            self.armor_tags[k] = v
+            item_name = _inventory_atlas_item_id(item, self.resources.get_json_data)
+            if item and item.get('tag'):
+                for k, v in item['tag'].items():
+                    if '_' in item_name and item_name.split('_')[0] in self.armor_types:
+                        self.armor_tags[k] = v
             return item_name
 
         def middle_slots(count, main=True, not_extra=True, target_sizer=None, start=0, align_slots=False):
@@ -5635,13 +5641,7 @@ class InventoryEditor(wx.Frame):
             middle_slots(3, target_sizer=tools_grid, start=1, align_slots=True)
 
             offhand_item = next((item for item in self.inventory.get('Offhand', [])), None)
-            item_name = ((offhand_item["Name"].py_str[10:] if offhand_item["Name"].py_str.startswith("minecraft:") else offhand_item["Name"].py_str) if offhand_item and "Name" in offhand_item else '')
-            if item_name == 'arrow':
-                damage_tag = offhand_item.get('Damage', None)
-                damage = getattr(damage_tag, 'py_int', damage_tag)
-                variant_name = f'arrow:{damage}'
-                if variant_name in self.resources.get_json_data:
-                    item_name = variant_name
+            item_name = _inventory_atlas_item_id(offhand_item, self.resources.get_json_data)
             display_name = self.resources.get(item_name, {}).get("display_name", "Empty")
             display_name = more_display_info(display_name, offhand_item)
             count = offhand_item.get("Count", 1) if offhand_item else 0
@@ -7107,9 +7107,8 @@ class ItemTools:
 
         new_tag = copy.deepcopy(copied_item)
         new_tag['Slot'] = ByteTag(slot_number)
-        original_name = getattr(new_tag.get('Name'), 'py_str', '')
-        bedrock_id = original_name[10:] if original_name.startswith('minecraft:') else original_name
         resources = _self.editor.resources
+        bedrock_id = _inventory_atlas_item_id(new_tag, resources.get_json_data)
         metadata = resources.get(bedrock_id, {}) or {}
         display_name = metadata.get('display_name') or bedrock_id or 'Unknown Item (No Name)'
         icon = resources.get_scaled_cache.get(bedrock_id)
