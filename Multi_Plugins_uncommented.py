@@ -3389,6 +3389,7 @@ class IconResources:
             self.addon_icon_ids = set()
             self.addon_base_icons = {}
             self.catalog_window = None
+            self._catalog_image_cache = {}
             self.items_id = []
 
             self.legacy_icon_cache = {}
@@ -3493,6 +3494,7 @@ class IconResources:
         return packs
 
     def _refresh_addon_icons(self):
+        self._catalog_image_cache.clear()
         for item_id, original in self.addon_base_icons.items():
             for name, value in original.items():
                 cache = getattr(self, name)
@@ -6042,8 +6044,14 @@ class IconListCtrl(wx.Frame):
         self.panel = wx.Panel(self)
         self.list_ctrl = wx.ListCtrl(self.panel, style=wx.LC_ICON)
         self.list_ctrl.SetFont(self.item_font)
-        self.image_list = wx.ImageList(self.icon_size, self.icon_size)
-        self.list_ctrl.AssignImageList(self.image_list, wx.IMAGE_LIST_NORMAL)
+        resources = self.data.resources
+        cached = resources._catalog_image_cache.get(self.icon_size)
+        if cached is not None and cached[0].GetImageCount() != cached[4]:
+            resources._catalog_image_cache.pop(self.icon_size, None)
+            cached = None
+        self._catalog_cached_images = cached
+        self.image_list = cached[0] if cached is not None else wx.ImageList(self.icon_size, self.icon_size)
+        self.list_ctrl.SetImageList(self.image_list, wx.IMAGE_LIST_NORMAL)
 
         self._set_catalog_icon_spacing(
 
@@ -6315,15 +6323,32 @@ class IconListCtrl(wx.Frame):
         self.key_slot = slot
 
     def load_all_items(self):
+        saved = self._catalog_cached_images
+        self._catalog_cached_images = None
+        if saved is not None:
+            self.all_items[:] = saved[1]
+            self.custom_items[:] = saved[2]
+            self.custom_item_ids.clear()
+            self.custom_item_ids.update(saved[3])
+            self.show_filtered_items(self.filterstring.GetValue())
+            return
+
         self.all_items.clear()
         self.custom_items.clear()
         self.custom_item_ids.clear()
         self.list_ctrl.DeleteAllItems()
-        self.image_list.RemoveAll()
+        if self.image_list.GetImageCount():
+            self.image_list = wx.ImageList(self.icon_size, self.icon_size)
+            self.list_ctrl.SetImageList(self.image_list, wx.IMAGE_LIST_NORMAL)
+        else:
+            self.image_list.RemoveAll()
 
-        scaled_cache = self.data.resources.get_scaled_cache
-        source_cache = self.data.resources.get_icon_cache
-        json_data = self.data.resources.get_json_data
+        resources = self.data.resources
+        scaled_cache = resources.get_scaled_cache
+        source_cache = resources.get_icon_cache
+        json_data = resources.get_json_data
+        overridden_ids = resources.addon_icon_ids
+        highres_icons = resources.get_highres_icon_cache
         nearest_quality = getattr(
             wx, "IMAGE_QUALITY_NEAREST", getattr(wx, "IMAGE_QUALITY_NORMAL", 0)
         )
@@ -6331,50 +6356,101 @@ class IconListCtrl(wx.Frame):
             wx, "IMAGE_QUALITY_HIGH",
             getattr(wx, "IMAGE_QUALITY_BILINEAR", getattr(wx, "IMAGE_QUALITY_NORMAL", 0)),
         )
+        image_indices_by_position = {}
+        reused_images = 0
+        icon_batch = []
+
+        def add_icon_batch():
+            if not icon_batch:
+                return
+            first_expected = self.image_list.GetImageCount()
+            try:
+                strip = wx.Image(self.icon_size * len(icon_batch), self.icon_size)
+                strip.InitAlpha()
+                for offset, (_, _, image) in enumerate(icon_batch):
+                    strip.Paste(image, offset * self.icon_size, 0)
+                bitmap = strip.ConvertToBitmap()
+                if bitmap and bitmap.IsOk():
+                    try:
+                        first_index = self.image_list.Add(bitmap)
+                    except Exception:
+                        first_index = -1
+                    if (first_index == first_expected and
+                            self.image_list.GetImageCount() == first_expected + len(icon_batch)):
+                        icon_batch.clear()
+                        return
+            except Exception:
+                pass
+
+            for index in range(self.image_list.GetImageCount() - 1, first_expected - 1, -1):
+                if not self.image_list.Remove(index):
+                    raise RuntimeError('Catalog image-list rollback failed')
+            if self.image_list.GetImageCount() != first_expected:
+                raise RuntimeError('Catalog image-list count changed unexpectedly')
+
+            for _, _, image in icon_batch:
+                bitmap = image.ConvertToBitmap()
+                if not bitmap or not bitmap.IsOk():
+                    raise RuntimeError('Catalog individual icon conversion failed')
+                expected_index = self.image_list.GetImageCount()
+                icon_index = self.image_list.Add(bitmap)
+                if (icon_index != expected_index or
+                        self.image_list.GetImageCount() != expected_index + 1):
+                    raise RuntimeError('Catalog individual icon insertion failed')
+            icon_batch.clear()
 
         for bedrock_id, info in json_data.items():
             if bedrock_id == 'banner':
                 continue
 
-            display_name = self.data.resources.get(bedrock_id, info).get('display_name', '')
-            bmp = wx.NullBitmap
+            display_name = resources.get(bedrock_id, info).get('display_name', '')
+            source = source_cache.get(bedrock_id)
+            position = info.get('icon_position') if isinstance(info, dict) else None
+            shared_position = None
+            if (isinstance(position, dict) and bedrock_id not in overridden_ids
+                    and bedrock_id not in highres_icons
+                    and source is not None and source.IsOk()):
+                shared_position = (position['x'], position['y'])
+                previous_index = image_indices_by_position.get(shared_position)
+                if previous_index is not None:
+                    self.all_items.append((bedrock_id, display_name, previous_index))
+                    reused_images += 1
+                    continue
 
+            img = None
             try:
-                source = source_cache.get(bedrock_id)
                 if source is not None and source.IsOk():
                     quality = (
                         reduction_quality
                         if source.GetWidth() > self.icon_size or source.GetHeight() > self.icon_size
                         else nearest_quality
                     )
-                    img = source.Scale(
-                        self.icon_size, self.icon_size, quality
-                    )
-                    if img.IsOk():
-                        bmp = img.ConvertToBitmap()
+                    img = source.Scale(self.icon_size, self.icon_size, quality)
             except Exception:
-                bmp = wx.NullBitmap
+                img = None
 
-            if not bmp or not bmp.IsOk():
+            if img is None or not img.IsOk():
                 fallback = scaled_cache.get(bedrock_id)
                 try:
                     if fallback and fallback.IsOk():
                         img = fallback.ConvertToImage()
                         if img.IsOk() and (img.GetWidth(), img.GetHeight()) != (self.icon_size, self.icon_size):
-                            img = img.Scale(
-                                self.icon_size, self.icon_size, nearest_quality
-                            )
-                        if img.IsOk():
-                            bmp = img.ConvertToBitmap()
+                            img = img.Scale(self.icon_size, self.icon_size, nearest_quality)
                 except Exception:
-                    bmp = wx.NullBitmap
+                    img = None
 
-            if bmp and bmp.IsOk():
-                icon_index = self.image_list.Add(bmp)
+            if img is not None and img.IsOk():
+                icon_index = self.image_list.GetImageCount() + len(icon_batch)
                 self.all_items.append((bedrock_id, display_name, icon_index))
+                if shared_position is not None:
+                    image_indices_by_position[shared_position] = icon_index
+                icon_batch.append((bedrock_id, display_name, img))
+                if len(icon_batch) == 16:
+                    add_icon_batch()
+        add_icon_batch()
 
         definitions = {}
-        for pack in self.data.resources.addon_packs:
+        for pack in resources.addon_packs:
             if pack.get('kind') == 'behavior':
                 for item_id, definition in pack.get('items', {}).items():
                     if ':' in item_id and not item_id.startswith('minecraft:'):
@@ -6382,7 +6458,7 @@ class IconListCtrl(wx.Frame):
         self.custom_item_ids.update(definitions)
         for item_id in sorted(definitions):
             definition = definitions[item_id]
-            metadata = self.data.resources.get(item_id, {})
+            metadata = resources.get(item_id, {})
             display_name = metadata.get('display_name') or definition.get('display_name') or item_id
             source = source_cache.get(item_id)
             if source is None or not source.IsOk():
@@ -6391,11 +6467,25 @@ class IconListCtrl(wx.Frame):
                 continue
             quality = (reduction_quality if source.GetWidth() > self.icon_size
                        or source.GetHeight() > self.icon_size else nearest_quality)
-            bmp = source.Scale(self.icon_size, self.icon_size, quality).ConvertToBitmap()
-            if bmp and bmp.IsOk():
-                icon_index = self.image_list.Add(bmp)
+            bitmap = source.Scale(self.icon_size, self.icon_size, quality).ConvertToBitmap()
+            if bitmap and bitmap.IsOk():
+                expected_index = self.image_list.GetImageCount()
+                icon_index = self.image_list.Add(bitmap)
+                if (icon_index != expected_index or
+                        self.image_list.GetImageCount() != expected_index + 1):
+                    raise RuntimeError('Catalog custom icon insertion failed')
                 self.custom_items.append((item_id, display_name, icon_index))
 
+        image_count = self.image_list.GetImageCount()
+        expected_count = len(self.all_items) + len(self.custom_items) - reused_images
+        if image_count != expected_count:
+            raise RuntimeError('Catalog image-list count does not match item mappings')
+        self.data.resources._catalog_image_cache = {
+            self.icon_size: (
+                self.image_list, tuple(self.all_items), tuple(self.custom_items),
+                frozenset(self.custom_item_ids), image_count,
+            )
+        }
         self.show_filtered_items(self.filterstring.GetValue())
 
     def show_filtered_items(self, filter_text=''):

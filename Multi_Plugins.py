@@ -3459,6 +3459,8 @@ class IconResources:
             self.addon_icon_ids = set()
             self.addon_base_icons = {}
             self.catalog_window = None
+            # Reuses complete images between newly constructed Catalog windows.
+            self._catalog_image_cache = {}
             self.items_id = []  # List to store item ids
             # legacy_icon_cache always contains the authoritative 32 x 32 atlas
             # cells. highres_icon_cache contains only optional 128 x 128 cells.
@@ -3577,6 +3579,8 @@ class IconResources:
         return packs
 
     def _refresh_addon_icons(self):
+        # Invalidates reusable artwork when add-on packs change.
+        self._catalog_image_cache.clear()
         for item_id, original in self.addon_base_icons.items():
             for name, value in original.items():
                 cache = getattr(self, name)
@@ -3687,7 +3691,7 @@ class IconResources:
             alpha = numpy.frombuffer(bytes(img.GetAlpha()), dtype=numpy.uint8).copy()
             alpha = alpha.reshape((height, width))
 
-            # Mark pixels touching true exterior transparency. Those retain the
+            # Marks pixels touching true exterior transparency. Those retain the
             # original alpha so the outer silhouette stays antialiased.
             zero = alpha == 0
             near_zero = numpy.zeros_like(zero)
@@ -4084,7 +4088,7 @@ class IconResources:
             self.open_catalog(parent, data, slot)
             return
 
-        # Reuse only when it is still owned by the active InventoryEditor.
+        # Reuses the Catalog only while the active InventoryEditor owns it.
         catalog_parent = self._catalog_parent(parent, data)
         try:
             if window.GetParent() is not catalog_parent:
@@ -4475,7 +4479,7 @@ def _selected_container_sync_amulet_cache(world, snapshot):
             raise ValueError("The saved Amulet container baseline is incompatible.")
         cached_tags = entity.nbt.compound
         baseline_tags = baseline.compound
-        # Do not synchronize across a locally changed chest pair or loot state.
+        # Skips synchronization across a locally changed chest pair or loot state.
         # Other tags, including furnace progress, remain owned by Amulet.
         for tag_name in ("pairx", "pairz", "pairlead", "forceunpair",
                          "LootTable", "LootTableSeed"):
@@ -5391,7 +5395,7 @@ class InventoryEditor(wx.Frame):
         main_vbox = wx.BoxSizer(wx.VERTICAL)
         self.scroll_panel = wx.ScrolledWindow(self, style=wx.VSCROLL | wx.HSCROLL | wx.CLIP_CHILDREN)
         self.scroll_panel.SetBackgroundColour(wx.Colour(0, 0, 0))
-        # Bind the capture-owner handlers once. Mutating wxWidgets' dynamic
+        # Binds the capture-owner handlers once. Mutating wxWidgets' dynamic
         # event table inside an active release callback can cause MSW asserts.
         self._inventory_drag_source = None
         self.scroll_panel.Bind(wx.EVT_MOTION, self._on_inventory_panel_motion)
@@ -6253,8 +6257,14 @@ class IconListCtrl(wx.Frame):
         self.panel = wx.Panel(self)
         self.list_ctrl = wx.ListCtrl(self.panel, style=wx.LC_ICON)
         self.list_ctrl.SetFont(self.item_font)
-        self.image_list = wx.ImageList(self.icon_size, self.icon_size)
-        self.list_ctrl.AssignImageList(self.image_list, wx.IMAGE_LIST_NORMAL)
+        resources = self.data.resources
+        cached = resources._catalog_image_cache.get(self.icon_size)
+        if cached is not None and cached[0].GetImageCount() != cached[4]:
+            resources._catalog_image_cache.pop(self.icon_size, None)
+            cached = None
+        self._catalog_cached_images = cached
+        self.image_list = cached[0] if cached is not None else wx.ImageList(self.icon_size, self.icon_size)
+        self.list_ctrl.SetImageList(self.image_list, wx.IMAGE_LIST_NORMAL)
         # Keeps label cells visually consistent as Windows DPI increases. The
         # ImageList and every bitmap placed in it now use the same calibrated
         # logical dimensions, so higher-DPI Catalogs get larger artwork without
@@ -6270,7 +6280,7 @@ class IconListCtrl(wx.Frame):
         self.list_ctrl.SetForegroundColour((0, 255, 0))
         self.list_ctrl.SetBackgroundColour((0, 0, 0))
 
-        # Track Catalog dragging by active state, not by attribute existence.
+        # Tracks Catalog dragging by active state, not by attribute existence.
         # drag_image may exist with a None value even when there is no drag.
         self.drag_image = None
         self.dragged_index = None
@@ -6544,15 +6554,33 @@ class IconListCtrl(wx.Frame):
         self.key_slot = slot
 
     def load_all_items(self):
+        saved = self._catalog_cached_images
+        self._catalog_cached_images = None
+        if saved is not None:
+            self.all_items[:] = saved[1]
+            self.custom_items[:] = saved[2]
+            self.custom_item_ids.clear()
+            self.custom_item_ids.update(saved[3])
+            self.show_filtered_items(self.filterstring.GetValue())
+            return
+
         self.all_items.clear()
         self.custom_items.clear()
         self.custom_item_ids.clear()
         self.list_ctrl.DeleteAllItems()
-        self.image_list.RemoveAll()
+        if self.image_list.GetImageCount():
+            # Preserves image lists still referenced by other Catalog windows.
+            self.image_list = wx.ImageList(self.icon_size, self.icon_size)
+            self.list_ctrl.SetImageList(self.image_list, wx.IMAGE_LIST_NORMAL)
+        else:
+            self.image_list.RemoveAll()
 
-        scaled_cache = self.data.resources.get_scaled_cache
-        source_cache = self.data.resources.get_icon_cache
-        json_data = self.data.resources.get_json_data
+        resources = self.data.resources
+        scaled_cache = resources.get_scaled_cache
+        source_cache = resources.get_icon_cache
+        json_data = resources.get_json_data
+        overridden_ids = resources.addon_icon_ids
+        highres_icons = resources.get_highres_icon_cache
         nearest_quality = getattr(
             wx, "IMAGE_QUALITY_NEAREST", getattr(wx, "IMAGE_QUALITY_NORMAL", 0)
         )
@@ -6560,52 +6588,106 @@ class IconListCtrl(wx.Frame):
             wx, "IMAGE_QUALITY_HIGH",
             getattr(wx, "IMAGE_QUALITY_BILINEAR", getattr(wx, "IMAGE_QUALITY_NORMAL", 0)),
         )
+        image_indices_by_position = {}
+        reused_images = 0
+        icon_batch = []
+
+        def add_icon_batch():
+            if not icon_batch:
+                return
+            first_expected = self.image_list.GetImageCount()
+            try:
+                strip = wx.Image(self.icon_size * len(icon_batch), self.icon_size)
+                strip.InitAlpha()
+                for offset, (_, _, image) in enumerate(icon_batch):
+                    strip.Paste(image, offset * self.icon_size, 0)
+                bitmap = strip.ConvertToBitmap()
+                if bitmap and bitmap.IsOk():
+                    try:
+                        first_index = self.image_list.Add(bitmap)
+                    except Exception:
+                        first_index = -1
+                    if (first_index == first_expected and
+                            self.image_list.GetImageCount() == first_expected + len(icon_batch)):
+                        icon_batch.clear()
+                        return
+            except Exception:
+                pass
+
+            # Recovers a failed batch without shifting any item image indices.
+            for index in range(self.image_list.GetImageCount() - 1, first_expected - 1, -1):
+                if not self.image_list.Remove(index):
+                    raise RuntimeError('Catalog image-list rollback failed')
+            if self.image_list.GetImageCount() != first_expected:
+                raise RuntimeError('Catalog image-list count changed unexpectedly')
+
+            # Retains the original per-icon insertion method as a local fallback.
+            for _, _, image in icon_batch:
+                bitmap = image.ConvertToBitmap()
+                if not bitmap or not bitmap.IsOk():
+                    raise RuntimeError('Catalog individual icon conversion failed')
+                expected_index = self.image_list.GetImageCount()
+                icon_index = self.image_list.Add(bitmap)
+                if (icon_index != expected_index or
+                        self.image_list.GetImageCount() != expected_index + 1):
+                    raise RuntimeError('Catalog individual icon insertion failed')
+            icon_batch.clear()
 
         for bedrock_id, info in json_data.items():
             if bedrock_id == 'banner':
                 continue
 
-            display_name = self.data.resources.get(bedrock_id, info).get('display_name', '')
-            bmp = wx.NullBitmap
+            display_name = resources.get(bedrock_id, info).get('display_name', '')
+            source = source_cache.get(bedrock_id)
+            position = info.get('icon_position') if isinstance(info, dict) else None
+            shared_position = None
+            if (isinstance(position, dict) and bedrock_id not in overridden_ids
+                    and bedrock_id not in highres_icons
+                    and source is not None and source.IsOk()):
+                # Shares only unchanged legacy artwork, never overridden sources.
+                shared_position = (position['x'], position['y'])
+                previous_index = image_indices_by_position.get(shared_position)
+                if previous_index is not None:
+                    self.all_items.append((bedrock_id, display_name, previous_index))
+                    reused_images += 1
+                    continue
 
-            # Builds from the preferred source cell: validated 128 x 128 master
-            # where available, otherwise the original 32 x 32 compatibility cell.
+            img = None
+            # Uses a high-resolution source when available, with legacy fallback.
             try:
-                source = source_cache.get(bedrock_id)
                 if source is not None and source.IsOk():
                     quality = (
                         reduction_quality
                         if source.GetWidth() > self.icon_size or source.GetHeight() > self.icon_size
                         else nearest_quality
                     )
-                    img = source.Scale(
-                        self.icon_size, self.icon_size, quality
-                    )
-                    if img.IsOk():
-                        bmp = img.ConvertToBitmap()
+                    img = source.Scale(self.icon_size, self.icon_size, quality)
             except Exception:
-                bmp = wx.NullBitmap
+                img = None
 
-            if not bmp or not bmp.IsOk():
+            if img is None or not img.IsOk():
                 fallback = scaled_cache.get(bedrock_id)
                 try:
                     if fallback and fallback.IsOk():
                         img = fallback.ConvertToImage()
                         if img.IsOk() and (img.GetWidth(), img.GetHeight()) != (self.icon_size, self.icon_size):
-                            img = img.Scale(
-                                self.icon_size, self.icon_size, nearest_quality
-                            )
-                        if img.IsOk():
-                            bmp = img.ConvertToBitmap()
+                            img = img.Scale(self.icon_size, self.icon_size, nearest_quality)
                 except Exception:
-                    bmp = wx.NullBitmap
+                    img = None
 
-            if bmp and bmp.IsOk():
-                icon_index = self.image_list.Add(bmp)
+            if img is not None and img.IsOk():
+                # Reserves the final index before inserting a pending batch.
+                icon_index = self.image_list.GetImageCount() + len(icon_batch)
                 self.all_items.append((bedrock_id, display_name, icon_index))
+                if shared_position is not None:
+                    image_indices_by_position[shared_position] = icon_index
+                icon_batch.append((bedrock_id, display_name, img))
+                if len(icon_batch) == 16:
+                    add_icon_batch()
+        add_icon_batch()
 
         definitions = {}
-        for pack in self.data.resources.addon_packs:
+        for pack in resources.addon_packs:
             if pack.get('kind') == 'behavior':
                 for item_id, definition in pack.get('items', {}).items():
                     if ':' in item_id and not item_id.startswith('minecraft:'):
@@ -6613,7 +6695,7 @@ class IconListCtrl(wx.Frame):
         self.custom_item_ids.update(definitions)
         for item_id in sorted(definitions):
             definition = definitions[item_id]
-            metadata = self.data.resources.get(item_id, {})
+            metadata = resources.get(item_id, {})
             display_name = metadata.get('display_name') or definition.get('display_name') or item_id
             source = source_cache.get(item_id)
             if source is None or not source.IsOk():
@@ -6622,11 +6704,25 @@ class IconListCtrl(wx.Frame):
                 continue
             quality = (reduction_quality if source.GetWidth() > self.icon_size
                        or source.GetHeight() > self.icon_size else nearest_quality)
-            bmp = source.Scale(self.icon_size, self.icon_size, quality).ConvertToBitmap()
-            if bmp and bmp.IsOk():
-                icon_index = self.image_list.Add(bmp)
+            bitmap = source.Scale(self.icon_size, self.icon_size, quality).ConvertToBitmap()
+            if bitmap and bitmap.IsOk():
+                expected_index = self.image_list.GetImageCount()
+                icon_index = self.image_list.Add(bitmap)
+                if (icon_index != expected_index or
+                        self.image_list.GetImageCount() != expected_index + 1):
+                    raise RuntimeError('Catalog custom icon insertion failed')
                 self.custom_items.append((item_id, display_name, icon_index))
 
+        image_count = self.image_list.GetImageCount()
+        expected_count = len(self.all_items) + len(self.custom_items) - reused_images
+        if image_count != expected_count:
+            raise RuntimeError('Catalog image-list count does not match item mappings')
+        self.data.resources._catalog_image_cache = {
+            self.icon_size: (
+                self.image_list, tuple(self.all_items), tuple(self.custom_items),
+                frozenset(self.custom_item_ids), image_count,
+            )
+        }
         self.show_filtered_items(self.filterstring.GetValue())
 
     def show_filtered_items(self, filter_text=''):
@@ -6657,7 +6753,7 @@ class TAGEditor(wx.Frame):
         super().__init__(parent, title=title, size=(600, 500), style=_float_on_parent_style())
         self._self = _self
         title = _self.Parent.Parent.GetTitle()
-        # Determine the slot number, ensuring it is valid
+        # Resolves and validates the slot number.
         key, slot = _self.Get_slot_map_key()
         keys = _self.editor.keys + [key]
         current_nbt = _self.editor.selected_player[keys]
@@ -7051,7 +7147,7 @@ class BannerSelector(wx.Frame):
         # Only modify non-transparent pixels
         mask = data[:, :, 3] > 0
         data[mask, :3] = color  # Sets RGB for non-transparent pixels
-        # Leave alpha channel as is
+        # Preserves the existing alpha channel.
 
         return Image.fromarray(data)
 
@@ -7169,7 +7265,7 @@ class BedrockNameTagAndLoreEditor(wx.Frame):
 
         self._self = _self
         title = _self.Parent.Parent.GetTitle()
-        # Determine the slot number, ensuring it is valid
+        # Resolves and validates the slot number.
         key, slot = _self.Get_slot_map_key()
         keys = _self.editor.keys + [key]
 
@@ -7236,7 +7332,7 @@ class BedrockNameTagAndLoreEditor(wx.Frame):
         self.preview = wx.StaticText(panel, label="", style=wx.ALIGN_LEFT)
         main_sizer.Add(self.preview, 0, wx.ALL, 5)
 
-        # Generate JSON
+        # Generates the name and lore JSON.
         gen_btn = wx.Button(panel, label="Save Name and Lore")
         gen_btn.Bind(wx.EVT_BUTTON, self.on_generate)
         main_sizer.Add(gen_btn, 0, wx.CENTER | wx.ALL, 5)
@@ -7657,7 +7753,7 @@ class ItemTools:
 
     def edit_fireworks_data(self, _self):
         title = _self.Parent.Parent.GetTitle()
-        # Determine the slot number, ensuring it is valid
+        # Resolves and validates the slot number.
 
         keys = _self.editor.keys + list(_self.Get_slot_map_key())
         current_nbt = _self.editor.selected_player[keys]
@@ -7772,7 +7868,7 @@ class ItemTools:
             ])
             container.Add(options, 0, wx.ALL, 5)
 
-            # Store controls
+            # Stores the selected controls.
             container.color_pickers = color_pickers
             container.fade_pickers = fade_pickers
             container.flicker = flicker_cb
@@ -8000,7 +8096,7 @@ class ItemTools:
                 ctrl.Enable(False)
 
         def save_data(evt):
-            # Retain every checkbox state across catalog mode changes.
+            # Retains every checkbox state across Catalog mode changes.
             # Validates selected levels before writing any item data.
             selected_levels = {}
             for ench_id in all_ids:
@@ -8064,10 +8160,10 @@ class ItemTools:
 
     def open_container(self, event, item_name, editor, last_key):
 
-        CLIP_BOARD.pop('COPY', None) # prevent drag and drop when opening
+        CLIP_BOARD.pop('COPY', None) # Clears copied-item state before opening the container.
         title = self.Parent.Parent.GetTitle()
 
-        # Determine the slot number, ensuring it is valid
+        # Resolves and validates the slot number.
 
         last_key, slot = self.Get_slot_map_key()
         keys = self.editor.keys + [last_key]
@@ -8192,7 +8288,7 @@ class IconButton(wx.Panel):
             self, value=str(self.count), size=count_size, style=count_style
         )
         if self._compact_ui:
-            # Do not depend on Amulet / Windows issuing a hover or selection repaint
+            # Sets native control colours without depending on a hover or selection repaint
             # before these native controls obtain their dark colours.
             self.SetBackgroundColour(wx.Colour(0, 0, 0))
             self.button.SetBackgroundColour(wx.Colour(46, 46, 46))
@@ -8209,7 +8305,7 @@ class IconButton(wx.Panel):
         self._drag_epoch = 0
         self._drag_moved = False
         self._drag_touched_slots = set()
-        # Capture on the editor's scroll panel rather than an item button.
+        # The editor's scroll panel owns mouse capture instead of an item button.
         # This keeps native button painting independent of drag movement.
         self._drag_capture_window = None
         self.Bind(wx.EVT_WINDOW_DESTROY, self._on_drag_destroy)
@@ -8221,8 +8317,8 @@ class IconButton(wx.Panel):
         self._drag_epoch = getattr(self, '_drag_epoch', 0) + 1
         if timer is not None:
             timer.Stop()
-        # Leave the scroll panel's permanent event bindings in place. Only
-        # Clears ownership here without Bind / Unbind during wx mouse-up dispatch.
+        # Preserves the scroll panel's permanent event bindings. Only
+        # clears capture ownership here without Bind / Unbind during wx mouse-up dispatch.
         self._drag_capture_window = None
         if getattr(self.editor, '_inventory_drag_source', None) is self:
             self.editor._inventory_drag_source = None
@@ -8284,7 +8380,7 @@ class IconButton(wx.Panel):
         source = CLIP_BOARD.get('SOURCE_SELF')
         if source is not None and source.drag_image is not None:
             source._drag_touched_slots.add(self)
-        # Do not call ReleaseMouse here. BeginDrag owns capture until EndDrag;
+        # Leaves ReleaseMouse to EndDrag. BeginDrag owns capture until EndDrag;
         # wxWidgets' capture stack can already be empty on an unrelated slot.
         # Hover transitions do not create an independent mouse capture.
         try:
@@ -8570,7 +8666,7 @@ class IconButton(wx.Panel):
         # If Windows revokes mouse capture, cancel rather than commit.
         if self.drag_image is not None:
             wx.CallAfter(self._cancel_lost_drag_capture)
-        # Do not Skip: wx requires us to handle mouse-capture loss.
+        # Handles mouse-capture loss without Skip, as required by wx.
 
     def _cancel_lost_drag_capture(self):
         if self.drag_image is not None:
@@ -9516,7 +9612,7 @@ class InventoryEditorList(wx.Frame):
             if compact_1080p:
                 title_floor = self.FromDIP(360)
             elif _ui_is_1440p_150(self):
-                # Leave enough caption width for the complete title on wxMSW.
+                # Reserves enough caption width for the complete title on wxMSW.
                 title_floor = 520
                 text_pad = 155
             desired_width = max(title_floor, text_width + text_pad)
@@ -10200,7 +10296,7 @@ class ResetVaults():
 
     def reset_vaults(self):
         """Resets vault reward tracking and reports incomplete chunk operations."""
-        # Retain the coordinates for the progress count and the actual scan.
+        # Retains the coordinates for the progress count and the actual scan.
         chunks = list(self.world.all_chunk_coords(self.canvas.dimension))
         total = len(chunks)
         processed = 0
@@ -10479,7 +10575,7 @@ class ChunkManager:
                             pair_chunk_x = same_x - x_old + new_x
                             pair_chunk_z = same_z - z_old + new_z
 
-                            # Adjust the chunk coordinates only if they are different
+                            # Adjusts the chunk coordinates only when they differ.
                             if same_x != x_old:
                                 raw_pair_x = (pair_chunk_x * 16) + pairx
                             else:
@@ -12077,7 +12173,7 @@ class NBTEditor(wx.Panel):
         self.dragItem = event.GetItem()
 
     def OnEndDrag(self, event):
-        # Ignore drops that do not land on a valid tree item.
+        # Ignores drops that do not land on a valid tree item.
         if event.GetItem().IsOk():
             target = event.GetItem()
         else:
@@ -12087,7 +12183,7 @@ class NBTEditor(wx.Panel):
             source = self.dragItem
         except:
             return
-        # Prevent the user from dropping an item inside of itself
+        # Prevents dropping an item inside itself.
         if self.tree.ItemIsChildOf(target, source):
             self.tree.Unselect()
             return
@@ -12100,7 +12196,7 @@ class NBTEditor(wx.Panel):
         # One of the following methods of inserting will be called...
         def MoveHere(event):
 
-            # Capture the source nodes before moving them.
+            # Captures the source nodes before moving them.
             save = self.tree.SaveItemsToList(source)
 
             self.tree.Delete(source)
@@ -12119,7 +12215,7 @@ class NBTEditor(wx.Panel):
                 self.tree.SelectItem(item)
 
         def InsertInToThisGroup(event):
-            # Capture source nodes before moving them into this group.
+            # Captures source nodes before moving them into this group.
             save = self.tree.SaveItemsToList(source)
             self.tree.Delete(source)
             newitems = self.tree.InsertItemsFromList(save, target)
@@ -13242,7 +13338,7 @@ class ShapePainter(wx.Frame):
 
             # Generates selection boxes for the dome
             for x in range(xx - radius, xx + radius + 1):
-                for y in range(yy, yy + radius + 1):  # Iterate only half the height
+                for y in range(yy, yy + radius + 1):  # Iterates over only half the height
                     for z in range(zz - radius, zz + radius + 1):
                         # Checks if the point is within the dome's surface
                         distance_squared = (x - xx) ** 2 + (y - yy) ** 2 + (z - zz) ** 2
@@ -13262,7 +13358,7 @@ class ShapePainter(wx.Frame):
 
             # Generates selection boxes for the upside-down dome
             for x in range(xx - radius, xx + radius + 1):
-                for y in range(yy - radius, yy + 1):  # Iterate only half the height, but in reverse
+                for y in range(yy - radius, yy + 1):  # Iterates over only half the height in reverse
                     for z in range(zz - radius, zz + radius + 1):
                         # Checks if the point is within the dome's surface
                         distance_squared = (x - xx) ** 2 + (y - yy) ** 2 + (z - zz) ** 2
@@ -13284,7 +13380,7 @@ class ShapePainter(wx.Frame):
             for x in range(xx, xx + length_x):
                 for y in range(yy, yy + length_y):
                     for z in range(zz, zz + length_z):
-                        # Skip the top and bottom faces
+                        # Skips the top and bottom faces.
                         if y == yy or y == yy + length_y - 1:
                             continue
                         # Checks if the block is part of the walls with the given thickness
@@ -13352,13 +13448,13 @@ class ShapePainter(wx.Frame):
             platform = self.world.level_wrapper.platform
             world_version = self.world.level_wrapper.version
 
-            # Place the new block and entity at the selected locations
+            # Places the new block and entity at the selected locations.
             for xx, yy, zz in blocks:
                 self.world.set_version_block(int(xx), int(yy), int(zz), self.canvas.dimension,
                                              (platform, world_version),
                                              newblock, newEntity)
 
-            # Rebuild the world renderer
+            # Rebuilds the world renderer.
             self.canvas.renderer.render_world.rebuild_changed()
         event.Skip()
 
@@ -14995,7 +15091,7 @@ class Java(wx.Panel):
             rcords[(rx, rz)].append((xc, xz))
 
         for rx, rz in rcords.keys():
-            path = self.world.level_wrapper.path  # need path for file
+            path = self.world.level_wrapper.path  # Java world path
             entitiesPath = self.get_dim_vpath_java_dir(rx, rz)  # full path for file
             file_exists = exists(entitiesPath)
             if file_exists:
@@ -15356,8 +15452,8 @@ class Java(wx.Panel):
                 if o.get("UUID") == uuid:
                     self.old_to_new_data["Level"]['Entities'][i] = data
         self.EntyData[self.ui_entitie_choice_list.GetSelection()] = newData
-        self.Entities_region.put_chunk_data(cx % 32, cz % 32, self.old_to_new_data)  # put data back where it goes
-        self.Entities_region.save()  # save file operation
+        self.Entities_region.put_chunk_data(cx % 32, cz % 32, self.old_to_new_data)  # Restores data to its original location.
+        self.Entities_region.save()  # Saves region data.
         self.world.save()
         EntitiePlugin.Onmsgbox(self, "Operation complete",
                                "The operation has completed without error:\n Save world to see the changes")
@@ -15541,7 +15637,7 @@ class Java(wx.Panel):
         self.found_entities = ListTag([])
         self.nbt_data = []
         for cx, cz in cl:
-            rx, rz = world_utils.chunk_coords_to_region_coords(cx, cz)  # need region cords for file
+            rx, rz = world_utils.chunk_coords_to_region_coords(cx, cz)  # Region coordinates for the file
             self.Entities_region = AnvilRegion(self.get_dim_vpath_java_dir(rx, rz))
             self.nbt_data_full = self.Entities_region.get_chunk_data(cx % 32, cz % 32)
 
@@ -15583,7 +15679,7 @@ class Java(wx.Panel):
     def set_entities_nbt(self, entities_list):
         entcnt = 0
         if self.world.level_wrapper.platform == "java":
-            path = self.world.level_wrapper.path  # need path for file
+            path = self.world.level_wrapper.path  # Java world path
             self.version_path = ""
             if self.world.level_wrapper.version >= 2730:
                 self.version_path = "entities"
@@ -15721,8 +15817,8 @@ class EntitiePlugin(wx.Frame):
         self._sizer_v_main = wx.BoxSizer(wx.VERTICAL)
         self.SetSizer(self._sizer_v_main)
 
-        # Retain these attribute names for compatibility with older code, but
-        # Uses ordinary non-overlapping sizers.
+        # Retains these attribute names for compatibility with older code, while
+        # using ordinary non-overlapping sizers.
         self.left_sizer = wx.BoxSizer(wx.VERTICAL)
         self.right_sizer = wx.BoxSizer(wx.VERTICAL)
         self.top_sizer = wx.BoxSizer(wx.VERTICAL)
@@ -17126,7 +17222,7 @@ class ProcessLevelDB:
                         if (x, y, z) in b_list:
                             block_entity[(x, y, z)] = {"entity_data": nbt}
 
-            # Iterate over level DB for blocks
+            # Iterates over LevelDB block records.
             for k, v in self.level_db.iterate(start=sub_key, end=sub_key + b'\xff\xff\xff'):
                 if k[-2] == 47:  # sublevel chunks 16x16x16 blocks
 
@@ -17220,7 +17316,7 @@ class ProcessLevelDB:
                                     self.found_data.set_data(x, y, z, CompoundTag({}), CompoundTag({}), nbt,
                                                              create_backup=True)
 
-            # Iterate over level DB for blocks
+            # Iterates over LevelDB block records.
 
             for k, v in self.level_db.iterate(start=chunkkey, end=chunkkey + b'\xff\xff\xff'):
 
@@ -17283,8 +17379,8 @@ class ProcessLevelDB:
             if old.get('states') == "*":
                 ignore_property = True
             new['version'] = IntTag(self.block_version)
-            old_raw = old.to_nbt(compressed=False, little_endian=True)[:-5]  # ignore version value
-            new_raw = new.to_nbt(compressed=False, little_endian=True)[:-5]  # ignore version value
+            old_raw = old.to_nbt(compressed=False, little_endian=True)[:-5]  # Excludes the version value
+            new_raw = new.to_nbt(compressed=False, little_endian=True)[:-5]  # Excludes the version value
 
         if ex_new and ex_old and ex_name:
 
@@ -17292,8 +17388,8 @@ class ProcessLevelDB:
             if ex_old.get('states') == "*":
                 e_ignore_property = True
             ex_new['version'] = IntTag(self.block_version)
-            ex_old_raw = old.to_nbt(compressed=False, little_endian=True)[:-5]  # ignore version value
-            ex_new_raw = new.to_nbt(compressed=False, little_endian=True)[:-5]  # ignore version value
+            ex_old_raw = old.to_nbt(compressed=False, little_endian=True)[:-5]  # Excludes the version value
+            ex_new_raw = new.to_nbt(compressed=False, little_endian=True)[:-5]  # Excludes the version value
 
         byte_dim = self.byte_dim()
         if mode == 0:
@@ -17988,7 +18084,7 @@ class JavaMapColorsResolver:
         target_lab = self.xyz_to_lab_np(numpy.array([target_xyz]))
 
         # Converts all candidate colors to Lab
-        candidate_rgb = self.map_colors_shaded[:, :3]  # Ignore alpha for color comparison
+        candidate_rgb = self.map_colors_shaded[:, :3]  # Excludes alpha from color comparison
         candidate_xyz = self.rgb_to_xyz_np(candidate_rgb)
         candidate_lab = self.xyz_to_lab_np(candidate_xyz)
 
@@ -19791,7 +19887,7 @@ class SetFrames(wx.Frame):
 
         self.grid_preview.Fit(self)
         self._sizer.Layout()  # Updates layout of the parent sizer
-        self.Fit()  # Adjust the size of the window to fit its content
+        self.Fit()  # Sizes the window to fit its contents.
         self.Layout()
         self.Thaw()
 
@@ -19841,8 +19937,8 @@ class SetFrames(wx.Frame):
         self.pointing.SetSelection(2)
         self.facing.SetSelection(2)
         self._sizer.Layout()  # Updates layout of the parent sizer
-        self.Fit()  # Adjust the size of the window to fit its content
-        self.Layout()  # Adjust the layout of the window
+        self.Fit()  # Sizes the window to fit its contents.
+        self.Layout()  # Updates the window layout.
         self.shape_of_image()
         self._selection = StaticSelectionBehaviour(self.canvas)
         self._cursor = PointerBehaviour(self.canvas)
@@ -23472,7 +23568,7 @@ class CustomToolTip(wx.PopupWindow):
         self._pending_button = btn
         self._create_ui()
 
-        # Bind event handlers
+        # Binds event handlers.
         btn.Bind(wx.EVT_ENTER_WINDOW, self.on_mouse_enter)
         btn.Bind(wx.EVT_LEAVE_WINDOW, self.on_mouse_leave)
         btn.Bind(wx.EVT_KILL_FOCUS, self.on_mouse_leave)
