@@ -5803,13 +5803,13 @@ class InventoryEditor(wx.Frame):
                         save_size = (80, 80)
                     save_bmp = wx.ArtProvider.GetBitmap(wx.ART_FILE_SAVE, wx.ART_TOOLBAR, save_size)
                     # Some Windows / wx builds return the stock toolbar art at a
-                    # smaller native bitmap than the requested size. Scale the
-                    # returned artwork explicitly so its visual size tracks the
+                    # smaller native bitmap than the requested size. The
+                    # returned artwork is scaled so its visual size tracks the
                     # continuously interpolated slot size instead of looking
                     # undersized at 100% and 150%.
                     try:
                         if save_bmp and save_bmp.IsOk():
-                            # Normalize native ArtProvider scale metadata by always
+                            # Normalizes native ArtProvider scale metadata by always
                             # round-tripping through wx.Image. This makes the tuned
                             # pixel target deterministic across 100%, 150%, and 225%
                             # instead of allowing a platform bitmap scale factor to
@@ -17999,7 +17999,7 @@ class JavaMapColorsResolver:
 
     # Helper function to convert RGB to XYZ color space using numpy
     def rgb_to_xyz_np(self, rgb):
-        # Normalize the RGB values to [0, 1]
+        # Normalizes the RGB values to [0, 1]
         rgb = rgb / 255.0
 
         # Applies sRGB companding (inverse gamma correction)
@@ -23257,7 +23257,7 @@ class BlendingWindow(wx.Frame):
         # Creates the UI elements
         self.create_ui()
 
-        # # Bind events
+        # Binds events
         self._run_button.Bind(wx.EVT_BUTTON, self._refresh_chunk)
         self.seed.Bind(wx.EVT_BUTTON, self.set_seed)
 
@@ -23640,7 +23640,7 @@ class CustomToolTip(wx.PopupWindow):
         self.Hide()
         event.Skip()
 
-class Tools(wx.Frame):
+class Tools(wx.Dialog):
     def __init__(self, parent, world, canvas, *args, **kw):
         super(Tools, self).__init__(parent, *args, **kw,
                                     style=(wx.SYSTEM_MENU | wx.CAPTION | wx.CLOSE_BOX | wx.CLIP_CHILDREN |
@@ -23649,6 +23649,8 @@ class Tools(wx.Frame):
         self.parent = parent
         self.world = world
         self.canvas = canvas
+
+        self.Bind(wx.EVT_CLOSE, self._on_close)
 
         # Main vertical sizer
         self.sizer = wx.BoxSizer(wx.VERTICAL)
@@ -23673,6 +23675,9 @@ class Tools(wx.Frame):
         self.Fit()
         self.Layout()
         self.Show(True)
+
+    def _on_close(self, event):
+        self.Destroy()
 
     def create_buttons(self):
         _size = self.FromDIP(wx.Size(170, 50))

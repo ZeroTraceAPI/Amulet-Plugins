@@ -23178,7 +23178,7 @@ class CustomToolTip(wx.PopupWindow):
         self.Hide()
         event.Skip()
 
-class Tools(wx.Frame):
+class Tools(wx.Dialog):
     def __init__(self, parent, world, canvas, *args, **kw):
         super(Tools, self).__init__(parent, *args, **kw,
                                     style=(wx.SYSTEM_MENU | wx.CAPTION | wx.CLOSE_BOX | wx.CLIP_CHILDREN |
@@ -23187,6 +23187,8 @@ class Tools(wx.Frame):
         self.parent = parent
         self.world = world
         self.canvas = canvas
+
+        self.Bind(wx.EVT_CLOSE, self._on_close)
 
         self.sizer = wx.BoxSizer(wx.VERTICAL)
         self.SetSizer(self.sizer)
@@ -23209,6 +23211,9 @@ class Tools(wx.Frame):
         self.Fit()
         self.Layout()
         self.Show(True)
+
+    def _on_close(self, event):
+        self.Destroy()
 
     def create_buttons(self):
         _size = self.FromDIP(wx.Size(170, 50))
