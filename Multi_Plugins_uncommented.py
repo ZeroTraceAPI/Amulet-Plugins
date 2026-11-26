@@ -3245,6 +3245,19 @@ def _find_world_addon_folders(world_path):
             missing.append(f"Multiple installed copies match {kind} pack {ident}; choose its folder manually.")
     return found, missing
 
+class _AtlasBitmapCache(dict):
+    def store_image(self, key, image):
+        self[key] = image if wx.Platform == "__WXMSW__" else image.ConvertToBitmap()
+
+    def __getitem__(self, key):
+        value = super().__getitem__(key)
+        return value.ConvertToBitmap() if isinstance(value, wx.Image) else value
+
+    def get(self, key, default=None):
+        if key in self:
+            return self[key]
+        return default
+
 class IconResources:
     _instance = None
 
@@ -3395,9 +3408,9 @@ class IconResources:
             self.legacy_icon_cache = {}
             self.highres_icon_cache = {}
             self.icon_cache = {}
-            self.scaled_cache = {}
-            self.scaled_cache32 = {}
-            self.dpi_scaled_cache = {}
+            self.scaled_cache = _AtlasBitmapCache()
+            self.scaled_cache32 = _AtlasBitmapCache()
+            self.dpi_scaled_cache = _AtlasBitmapCache()
             self.highres_data = {}
             self.highres_atlas_path = None
 
@@ -3502,8 +3515,10 @@ class IconResources:
                     cache.pop(item_id, None)
                 else:
                     cache[item_id] = value
-        self.dpi_scaled_cache = {key: value for key, value in self.dpi_scaled_cache.items()
-                                 if key[0] not in self.addon_icon_ids}
+        self.dpi_scaled_cache = _AtlasBitmapCache(
+            (key, value) for key, value in self.dpi_scaled_cache.items()
+            if key[0] not in self.addon_icon_ids
+        )
         self.addon_base_icons.clear()
         self.addon_icon_ids.clear()
         self.addon_item_data.clear()
@@ -3529,10 +3544,11 @@ class IconResources:
             if not img.IsOk():
                 continue
             self.addon_base_icons[item_id] = {
-                key: getattr(self, key).get(item_id) for key in ('icon_cache', 'scaled_cache', 'scaled_cache32')}
+                key: dict.get(getattr(self, key), item_id)
+                for key in ('icon_cache', 'scaled_cache', 'scaled_cache32')}
             self.icon_cache[item_id] = img
-            self.scaled_cache[item_id] = img.Scale(64, 64, wx.IMAGE_QUALITY_NEAREST).ConvertToBitmap()
-            self.scaled_cache32[item_id] = img.Scale(32, 32, wx.IMAGE_QUALITY_NEAREST).ConvertToBitmap()
+            self.scaled_cache.store_image(item_id, img.Scale(64, 64, wx.IMAGE_QUALITY_NEAREST))
+            self.scaled_cache32.store_image(item_id, img.Scale(32, 32, wx.IMAGE_QUALITY_NEAREST))
             label = names.get(item_id) or definitions.get(item_id, {}).get('display_name')
             if label and label != item_id:
                 self.addon_item_data[item_id] = dict(self.data.get(item_id, {}), display_name=label)
@@ -3547,8 +3563,10 @@ class IconResources:
             if item_id in self.data and item_id not in self.addon_item_data:
                 if label != self.data[item_id].get('display_name'):
                     self.addon_item_data[item_id] = dict(self.data[item_id], display_name=label)
-        self.dpi_scaled_cache = {key: value for key, value in self.dpi_scaled_cache.items()
-                                 if key[0] not in self.addon_icon_ids}
+        self.dpi_scaled_cache = _AtlasBitmapCache(
+            (key, value) for key, value in self.dpi_scaled_cache.items()
+            if key[0] not in self.addon_icon_ids
+        )
 
     @property
     def get_items_id(self):
@@ -3578,9 +3596,9 @@ class IconResources:
     def get_scaled_cache32(self):
         return self.scaled_cache32
 
-    def _make_native_menu_bitmap(self, item_id, img):
+    def _make_native_menu_image(self, item_id, img):
         if item_id not in MENU_ALPHA_REPAIR_IDS or not img.HasAlpha():
-            return img.ConvertToBitmap()
+            return img
 
         try:
             width, height = img.GetWidth(), img.GetHeight()
@@ -3617,11 +3635,11 @@ class IconResources:
                 repaired.SetData(rgb.tobytes())
                 repaired.SetAlpha(alpha.tobytes())
                 if repaired.IsOk():
-                    return repaired.ConvertToBitmap()
+                    return repaired
         except Exception as e:
             print(f"Menu alpha repair failed for {item_id}: {e}")
 
-        return img.ConvertToBitmap()
+        return img
 
     def load_icon_cache(self, atlas, highres_atlas=None):
 
@@ -3736,8 +3754,8 @@ class IconResources:
                 menu_source = legacy
             menu_image = scale_source(menu_source, 32, 32)
             if menu_image is not None and menu_image.IsOk():
-                self.scaled_cache32[item_id] = self._make_native_menu_bitmap(
-                    item_id, menu_image
+                self.scaled_cache32.store_image(
+                    item_id, self._make_native_menu_image(item_id, menu_image)
                 )
 
             preferred = self.icon_cache.get(item_id)
@@ -3745,7 +3763,7 @@ class IconResources:
             if (scaled_img is None or not scaled_img.IsOk()) and preferred is not legacy:
                 scaled_img = scale_source(legacy, target_width, target_height)
             if scaled_img is not None and scaled_img.IsOk():
-                self.scaled_cache[item_id] = scaled_img.ConvertToBitmap()
+                self.scaled_cache.store_image(item_id, scaled_img)
 
     def get_bitmap(self, bedrock_id):
         return self.scaled_cache.get(bedrock_id)
@@ -3758,7 +3776,6 @@ class IconResources:
         scale = _ui_dpi_scale(window) if window is not None else 1.0
 
         if getattr(wx, "Platform", "") == "__WXMSW__":
-            fallback = self.scaled_cache.get(bedrock_id, wx.NullBitmap)
             try:
                 pixel_size = int(logical_size)
                 if pixel_size != 64 and 32 <= pixel_size <= 128:
@@ -3775,11 +3792,12 @@ class IconResources:
                     if scaled is not None and scaled.IsOk():
                         bitmap = scaled.ConvertToBitmap()
                         if bitmap is not None and bitmap.IsOk():
-                            self.dpi_scaled_cache[cache_key] = bitmap
+                            self.dpi_scaled_cache[cache_key] = scaled
                             return bitmap
-                return fallback if fallback and fallback.IsOk() else wx.NullBitmap
             except Exception:
-                return fallback if fallback and fallback.IsOk() else wx.NullBitmap
+                pass
+            fallback = self.scaled_cache.get(bedrock_id, wx.NullBitmap)
+            return fallback if fallback and fallback.IsOk() else wx.NullBitmap
 
         scale_key = round(scale, 3)
         cache_key = (bedrock_id, int(logical_size), scale_key)
