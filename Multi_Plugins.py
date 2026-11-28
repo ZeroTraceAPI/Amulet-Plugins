@@ -5433,7 +5433,7 @@ class InventoryEditor(wx.Frame):
         menubar = wx.MenuBar()
         file_menu = wx.Menu()
 
-        file_menu.Append(wx.ID_OPEN, "Import Inventory\tCtrl+O", "Opens an inventory file")
+        file_menu.Append(wx.ID_OPEN, "Import Inventory\tCtrl+O", "Loads inventory data into memory")
         self.Bind(wx.EVT_MENU, self.on_open, id=wx.ID_OPEN)
 
         file_menu.Append(wx.ID_SAVE, "Export Inventory\tCtrl+S", "Exports inventory data")
@@ -5541,15 +5541,112 @@ class InventoryEditor(wx.Frame):
                            style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as file_dialog:
             if file_dialog.ShowModal() == wx.ID_CANCEL:
                 return
-
             pathname = file_dialog.GetPath()
-            print(f"Opening file: {pathname}")
-            loaded_nbt = load(pathname, compressed=False, little_endian=True,
-                 string_decoder=utf8_escape_decoder).compound
 
-            self.selected_player.clear()
-            self.selected_player.update(loaded_nbt)
-            self.selected_player.save_player()
+        try:
+            loaded_nbt = load(pathname, compressed=False, little_endian=True,
+                              string_decoder=utf8_escape_decoder).compound
+        except Exception as error:
+            wx.MessageBox(f"Could not read the inventory file. It may be damaged, inaccessible, or in an unsupported format.\n\nDetails: {error}",
+                          "Import Inventory", wx.OK | wx.ICON_ERROR, self)
+            return
+
+        try:
+            if isinstance(self.selected_player, SelectedContainerStaging):
+                self.selected_player.items_by_slot(loaded_nbt.get("Items"))
+            staged = PlayersData.Player(loaded_nbt, self.selected_player.player_id,
+                                        self.selected_player.world)
+            editors = [self]
+            editors.extend(window for window in wx.GetTopLevelWindows()
+                           if window is not self and isinstance(window, InventoryEditor)
+                           and window.selected_player is self.selected_player
+                           and not window.IsBeingDeleted())
+            displays = [(editor, *editor._import_slot_data(staged)) for editor in editors]
+        except Exception as error:
+            message = "Could not import inventory data. The file may be incompatible or missing required inventory data."
+            if isinstance(loaded_nbt, CompoundTag):
+                player_keys = ('Inventory', 'Armor', 'Offhand', 'EnderChestInventory')
+                container_data = (isinstance(loaded_nbt.get('Items'), ListTag)
+                                  and not any(key in loaded_nbt for key in player_keys))
+                player_data = (isinstance(loaded_nbt.get('Inventory'), ListTag)
+                               and any(isinstance(loaded_nbt.get(key), ListTag) for key in player_keys[1:])
+                               and 'Items' not in loaded_nbt)
+                if isinstance(self.selected_player, SelectedContainerStaging):
+                    if player_data:
+                        message = ("This file appears to contain a player inventory and lacks the container item list. "
+                                   "Importing player inventories into selected containers is not currently supported.")
+                elif container_data:
+                    message = ("This file appears to contain a container inventory and lacks the required player inventory data. "
+                               "Importing container inventories into player inventories is not currently supported.")
+            wx.MessageBox(f"{message}\n\nDetails: {error}", "Import Inventory",
+                          wx.OK | wx.ICON_ERROR, self)
+            return
+
+        self.selected_player.update(loaded_nbt)
+        for editor, inventory, slots in displays:
+            editor._refresh_imported_slots(inventory, slots)
+        print(f"Imported inventory into memory: {pathname}")
+
+    def _import_slot_data(self, player):
+        """Prepares imported slot data before replacing the shared player record."""
+        inventory = player[[]]
+        path = []
+        for key in self.keys:
+            if isinstance(inventory, ListTag):
+                index = _inventory_item_index(inventory, key, path)
+                if index is None:
+                    raise ValueError(f"An open container editor no longer has its item in the imported data: {self.GetTitle()}")
+                inventory = inventory[index]
+            else:
+                inventory = inventory[key]
+            path.append(key)
+        if not isinstance(inventory, CompoundTag):
+            raise ValueError(f"The imported data does not contain the inventory for {self.GetTitle()}.")
+        slots = []
+        for (key, slot_number), control in self.slot_map.items():
+            items = inventory.get(key)
+            if not isinstance(items, ListTag):
+                raise ValueError(f"The imported data is missing the {key} item list.")
+            path = self.keys + [key]
+            index = _inventory_item_index(items, slot_number, path)
+            if len(path) == 1 and key in ('Armor', 'Offhand') and index is None:
+                raise ValueError(f"The imported {key} list is missing a fixed equipment slot.")
+            item = items[index] if index is not None else None
+            item_id = _inventory_atlas_item_id(item, self.resources.get_json_data)
+            default_count = 1 if self._main_inventory_ui else 0
+            count = getattr(item.get('Count'), 'py_int', default_count) if item else 0
+            if item_id and count:
+                name = self.resources.get(item_id, {}).get('display_name', item_id)
+                name = self._item_display_info(name, item, inventory)
+            else:
+                item_id, name, count, item = '', 'Empty', 0, None
+            slots.append((control, item_id, name, count, item))
+        return inventory, slots
+
+    def _refresh_imported_slots(self, inventory, slots):
+        """Updates existing controls from the imported in-memory inventory."""
+        self.inventory = inventory
+        self.armor_tags.clear()
+        source = self._active_panel_drag_source()
+        if source is not None:
+            source._finish_drag_visual()
+            if CLIP_BOARD.get('SOURCE_SELF') is source:
+                CLIP_BOARD.clear()
+        catalog = self.resources._get_catalog_window()
+        if catalog is not None and catalog.data is self:
+            catalog._end_catalog_drag(cancel=True)
+            catalog.end_equipment_change()
+        for control, item_id, name, count, item in slots:
+            if not item_id:
+                control.delete_slot()
+                continue
+            control.SetLabelText(item_id)
+            control.SetTagData(item)
+            control.SetValue(count)
+            control.button.SetName(item_id)
+            self._refresh_slot_display(control, item_id, name)
+        self.scroll_panel.Layout()
+        self.scroll_panel.Refresh()
 
     def on_save(self, event):
 
@@ -5638,6 +5735,22 @@ class InventoryEditor(wx.Frame):
         lines.extend(issues)
         wx.MessageBox('\n'.join(lines), 'Add-on Packs', wx.OK | wx.ICON_INFORMATION, self)
 
+    def _refresh_slot_display(self, slot, item_id, shown_name):
+        """Refreshes an existing slot bitmap, label and tooltip."""
+        bitmap = self.resources.get_scaled_cache.get(item_id)
+        slot.icon_bitmap = bitmap
+        slot.SetBitmap(bitmap, shown_name)
+        if bitmap and bitmap.IsOk():
+            slot.button.SetLabel('')
+        else:
+            slot.button.SetBitmap(wx.NullBitmap)
+            parts = item_id.split('_')
+            slot.button.SetLabel('\n'.join(
+                part + ('_' if index < len(parts) - 1 else '')
+                for index, part in enumerate(parts)
+            ))
+        slot.button.Refresh()
+
     def refresh_addon_display(self, previous_names):
         """Refreshes visible item images and labels without rebuilding inventory controls."""
         for slot in self.slot_map.values():
@@ -5651,19 +5764,7 @@ class InventoryEditor(wx.Frame):
                 shown_name = current_name
             elif shown_name.startswith(previous_name + '\n'):
                 shown_name = current_name + shown_name[len(previous_name):]
-            bitmap = self.resources.get_scaled_cache.get(item_id)
-            slot.icon_bitmap = bitmap
-            slot.SetBitmap(bitmap, shown_name)
-            if bitmap and bitmap.IsOk():
-                slot.button.SetLabel('')
-            else:
-                slot.button.SetBitmap(wx.NullBitmap)
-                parts = item_id.split('_')
-                slot.button.SetLabel('\n'.join(
-                    part + ('_' if index < len(parts) - 1 else '')
-                    for index, part in enumerate(parts)
-                ))
-            slot.button.Refresh()
+            self._refresh_slot_display(slot, item_id, shown_name)
         self.scroll_panel.Layout()
         self.scroll_panel.Refresh()
         catalog = self.resources._get_catalog_window()
@@ -5754,49 +5855,49 @@ class InventoryEditor(wx.Frame):
         self._ender_chest_editor = InventoryEditor(self, self.selected_player, [], title='Ender Chest')
         self._ender_chest_editor.Raise()
 
+    def _item_display_info(self, display_name, item, inventory):
+        if not item:
+            return display_name or "Empty"
+
+        def get_items_info(tag_list):
+            result = ""
+            for i, (name, count) in enumerate(tag_list):
+                name_item = inventory.get(name[10:], {}).get("display_name", "Empty")
+                if i % 8 == 0:
+                    result += f"\n{name_item} {count}   ||  "
+                else:
+                    result += f"{name_item} {count}  ||   "
+            return result
+
+        bundle = item.get('tag', {}).get('storage_item_component_content')
+        if bundle:
+            tag_list = [(x.get('Name').py_str, x.get('Count').py_int) for x in bundle]
+            display_name += "\n Items:" + get_items_info(tag_list)
+        try:
+            item_list = item.get('tag', {}).get('Items')
+        except (KeyError, IndexError, TypeError):
+            item_list = False
+            print("Container item list could not be read; item details may be incomplete.")
+            pass
+        if item_list:
+            if len(item_list) > 0:
+                try:
+                    tag_list = [(x.get('Name').py_str, x.get('Count').py_int) for x in item_list]
+                    display_name += "\n Items:" + get_items_info(tag_list)
+                except:
+                    pass
+        ench = item.get('tag', {}).get('ench')
+        if ench:
+            display_name += "\n Enchantments:"
+            for x in ench:
+                display_name += f"\n{enchantments[x.get('id').py_int]} {x.get('lvl').py_int}"
+
+        return display_name or "Empty"
+
     def populate_grid(self):
         self.grid_sizer.Clear(delete_windows=False)
 
         armor_buttons = []
-
-        def more_display_info(display_name, item):
-            if not item:
-                return display_name or "Empty"
-
-            def get_items_info(tag_list):
-                result = ""
-                for i, (name, count) in enumerate(tag_list):
-                    name_item = self.inventory.get(name[10:], {}).get("display_name", "Empty")
-                    if i % 8 == 0:
-                        result += f"\n{name_item} {count}   ||  "
-                    else:
-                        result += f"{name_item} {count}  ||   "
-                return result
-
-            bundle = item.get('tag', {}).get('storage_item_component_content')
-            if bundle:
-                tag_list = [(x.get('Name').py_str, x.get('Count').py_int) for x in bundle]
-                display_name += "\n Items:" + get_items_info(tag_list)
-            try:
-                item_list = item.get('tag', {}).get('Items')
-            except (KeyError, IndexError, TypeError):
-                item_list = False
-                print("Container item list could not be read; item details may be incomplete.")
-                pass
-            if item_list:
-                if len(item_list) > 0:
-                    try:
-                        tag_list = [(x.get('Name').py_str, x.get('Count').py_int) for x in item_list]
-                        display_name += "\n Items:" + get_items_info(tag_list)
-                    except:
-                        pass
-            ench = item.get('tag', {}).get('ench')
-            if ench:
-                display_name += "\n Enchantments:"
-                for x in ench:
-                    display_name += f"\n{enchantments[x.get('id').py_int]} {x.get('lvl').py_int}"
-
-            return display_name or "Empty"
 
         def processes_item_iter_next(item):
             item_name = _inventory_atlas_item_id(item, self.resources.get_json_data)
@@ -5899,7 +6000,7 @@ class InventoryEditor(wx.Frame):
                 item = self.inventory.get('Armor', [None] * 4)[i]
                 item_name = ((item["Name"].py_str[10:] if item["Name"].py_str.startswith("minecraft:") else item["Name"].py_str) if item and "Name" in item else '')
                 display_name = self.resources.get(item_name, {}).get("display_name", "Empty")
-                display_name = more_display_info(display_name, item)
+                display_name = self._item_display_info(display_name, item, self.inventory)
                 count = item.get("Count", 1) if item else 0
                 icon_bitmap = self.resources.get_scaled_cache.get(item_name, wx.NullBitmap)
 
@@ -5915,7 +6016,7 @@ class InventoryEditor(wx.Frame):
             offhand_item = next((item for item in self.inventory.get('Offhand', [])), None)
             item_name = _inventory_atlas_item_id(offhand_item, self.resources.get_json_data)
             display_name = self.resources.get(item_name, {}).get("display_name", "Empty")
-            display_name = more_display_info(display_name, offhand_item)
+            display_name = self._item_display_info(display_name, offhand_item, self.inventory)
             count = offhand_item.get("Count", 1) if offhand_item else 0
             icon_bitmap = self.resources.get_scaled_cache.get(item_name)
             offhand_button = IconButton(self.scroll_panel, item_name, display_name, count, icon_bitmap, 0, self)
@@ -5928,7 +6029,7 @@ class InventoryEditor(wx.Frame):
                 item = next((i for i in self.inventory.get('Inventory', []) if i.get("Slot").py_int == slot), None)
                 item_name = processes_item_iter_next(item)
                 display_name = self.resources.get(item_name, {}).get("display_name", item_name)
-                display_name = more_display_info(display_name, item)
+                display_name = self._item_display_info(display_name, item, self.inventory)
                 count = item.get("Count", 1) if item else 0
                 icon_bitmap = self.resources.get_scaled_cache.get(item_name)
                 button = IconButton(self.scroll_panel, item_name, display_name, count, icon_bitmap, slot, self)
@@ -5952,7 +6053,7 @@ class InventoryEditor(wx.Frame):
                 item = next((i for i in self.inventory.get('Inventory', []) if i.get("Slot").py_int == slot), None)
                 item_name = processes_item_iter_next(item)
                 display_name = self.resources.get(item_name, {}).get("display_name", item_name)
-                display_name = more_display_info(display_name, item)
+                display_name = self._item_display_info(display_name, item, self.inventory)
                 count = item.get("Count", 1) if item else 0
                 icon_bitmap = self.resources.get_scaled_cache.get(item_name)
                 button = IconButton(self.scroll_panel, item_name, display_name, count, icon_bitmap, slot, self)
@@ -6072,7 +6173,7 @@ class InventoryEditor(wx.Frame):
 
                 item_name = processes_item_iter_next(item)
                 display_name = self.resources.get(item_name, {}).get("display_name", "Empty")
-                display_name = more_display_info(display_name, item)
+                display_name = self._item_display_info(display_name, item, self.inventory)
 
                 if not item:
                     display_name = "Empty"
@@ -6109,6 +6210,26 @@ class SelectedContainerStaging(PlayersData.Player):
         original_items = snapshot.get("inventory_nbt", snapshot["original_nbt"]).compound.get("Items", ListTag([]))
         source = CompoundTag({"Items": copy.deepcopy(original_items)})
         super().__init__(source, "selected_container", world)
+        self.slot_count = snapshot.get("slot_count", 27)
+
+    def items_by_slot(self, items):
+        """Validates item entries against the selected container capacity."""
+        if not isinstance(items, ListTag):
+            raise ValueError("The container inventory is missing a valid Items list.")
+        by_slot = {}
+        for item in items:
+            if not isinstance(item, CompoundTag) or not isinstance(item.get("Slot"), ByteTag):
+                raise ValueError("The container inventory contains an item with missing or invalid slot data.")
+            slot = item["Slot"].py_int
+            if slot < 0:
+                raise ValueError(f"The container inventory contains an invalid negative slot index ({slot}).")
+            if slot >= self.slot_count:
+                raise ValueError(f"The destination container has {self.slot_count} slots, but the inventory data "
+                                 f"contains an item in slot {slot + 1}. Items retain their original slot positions.")
+            if slot in by_slot:
+                raise ValueError(f"The container inventory contains multiple entries for slot {slot + 1}.")
+            by_slot[slot] = item
+        return by_slot
 
     def save_player(self):
         # Item tools reuse this hook. Only the container editor's Save button
@@ -6147,16 +6268,7 @@ class SelectedContainerInventoryEditor(InventoryEditor):
     def _pending_container_slots(self):
         """Collects regular IconButton changes without discarding unedited item NBT."""
         staged = self._container_staging.player_data.get("Items")
-        if not isinstance(staged, ListTag):
-            raise ValueError("The staged container inventory is not an NBT item list.")
-        by_slot = {}
-        for item in staged:
-            if not isinstance(item, CompoundTag) or not isinstance(item.get("Slot"), ByteTag):
-                raise ValueError("The staged inventory contains an unsupported item entry.")
-            slot = item["Slot"].py_int
-            if not 0 <= slot < self.container_snapshot.get("slot_count", 27) or slot in by_slot:
-                raise ValueError("The staged inventory has duplicate or out-of-range slots.")
-            by_slot[slot] = item
+        by_slot = self._container_staging.items_by_slot(staged)
         original = {}
         for item in self.container_snapshot.get("inventory_nbt",
                   self.container_snapshot.get("saved_preview_nbt", self.container_snapshot["original_nbt"])).compound.get("Items", ()):
