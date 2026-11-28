@@ -3258,6 +3258,22 @@ class _AtlasBitmapCache(dict):
             return self[key]
         return default
 
+_UI_SLOT_ICON_LAYOUT = {
+    'empty_armor_slot_helmet': (0, 0),
+    'empty_armor_slot_chestplate': (16, 0),
+    'empty_armor_slot_leggings': (32, 0),
+    'empty_armor_slot_boots': (48, 0),
+    'empty_armor_slot_shield': (64, 0),
+}
+
+_UI_SLOT_LABELS = {
+    'empty_armor_slot_helmet': 'Empty Helmet Slot',
+    'empty_armor_slot_chestplate': 'Empty Chestplate Slot',
+    'empty_armor_slot_leggings': 'Empty Leggings Slot',
+    'empty_armor_slot_boots': 'Empty Boots Slot',
+    'empty_armor_slot_shield': 'Empty Offhand Slot',
+}
+
 class IconResources:
     _instance = None
 
@@ -3408,7 +3424,10 @@ class IconResources:
             self.legacy_icon_cache = {}
             self.highres_icon_cache = {}
             self.icon_cache = {}
+            self.ui_icon_cache = {}
             self.scaled_cache = _AtlasBitmapCache()
+            self.ui_scaled_cache = _AtlasBitmapCache()
+            self.ui_dpi_scaled_cache = _AtlasBitmapCache()
             self.scaled_cache32 = _AtlasBitmapCache()
             self.dpi_scaled_cache = _AtlasBitmapCache()
             self.highres_data = {}
@@ -3486,8 +3505,10 @@ class IconResources:
                     )
 
             self.load_icon_cache(self.data, self.highres_data)
+            self.load_ui_icon_cache(self.data)
 
             self.data.pop('atlas', None)
+            self.data.pop('ui', None)
             if isinstance(self.highres_data, dict):
                 self.highres_data.pop('atlas', None)
             self._initialized = True
@@ -3764,6 +3785,119 @@ class IconResources:
                 scaled_img = scale_source(legacy, target_width, target_height)
             if scaled_img is not None and scaled_img.IsOk():
                 self.scaled_cache.store_image(item_id, scaled_img)
+
+    def load_ui_icon_cache(self, data):
+        ui_blob = data.get('ui') if isinstance(data, dict) else None
+        if not ui_blob:
+            return
+        try:
+            if isinstance(ui_blob, str) and ui_blob.startswith("data:"):
+                ui_blob = ui_blob.split(",", 1)[1]
+            ui_data = base64.b64decode(ui_blob)
+            buffer = io.BytesIO(ui_data)
+            ui_image = wx.Image()
+            ui_image.LoadFile(buffer, wx.BITMAP_TYPE_PNG)
+        except Exception:
+            return
+        if ui_image is None or not ui_image.IsOk():
+            return
+
+        nearest_quality = getattr(
+            wx, "IMAGE_QUALITY_NEAREST", getattr(wx, "IMAGE_QUALITY_NORMAL", 0)
+        )
+        for icon_id, (x, y) in _UI_SLOT_ICON_LAYOUT.items():
+            try:
+                if x < 0 or y < 0 or x + 16 > ui_image.GetWidth() or y + 16 > ui_image.GetHeight():
+                    continue
+                icon_image = ui_image.GetSubImage(wx.Rect(x, y, 16, 16))
+                if icon_image is None or not icon_image.IsOk():
+                    continue
+                self.ui_icon_cache[icon_id] = icon_image
+                scaled = icon_image.Scale(64, 64, nearest_quality)
+                if scaled is not None and scaled.IsOk():
+                    self.ui_scaled_cache.store_image(icon_id, scaled)
+            except Exception:
+                continue
+
+    def get_dpi_ui_bitmap(self, icon_id, window=None, logical_size=64):
+        img = self.ui_icon_cache.get(icon_id)
+        if img is None or not img.IsOk():
+            return self.ui_scaled_cache.get(icon_id, wx.NullBitmap)
+
+        scale = _ui_dpi_scale(window) if window is not None else 1.0
+
+        if getattr(wx, "Platform", "") == "__WXMSW__":
+            try:
+                pixel_size = int(logical_size)
+                if pixel_size != 64 and 16 <= pixel_size <= 128:
+                    cache_key = (icon_id, pixel_size, "msw")
+                    cached = self.ui_dpi_scaled_cache.get(cache_key)
+                    if cached is not None and cached.IsOk():
+                        return cached
+                    quality = (
+                        getattr(wx, "IMAGE_QUALITY_HIGH", wx.IMAGE_QUALITY_NORMAL)
+                        if img.GetWidth() > pixel_size or img.GetHeight() > pixel_size
+                        else getattr(wx, "IMAGE_QUALITY_NEAREST", wx.IMAGE_QUALITY_NORMAL)
+                    )
+                    scaled = img.Scale(pixel_size, pixel_size, quality)
+                    if scaled is not None and scaled.IsOk():
+                        bitmap = scaled.ConvertToBitmap()
+                        if bitmap is not None and bitmap.IsOk():
+                            self.ui_dpi_scaled_cache[cache_key] = scaled
+                            return bitmap
+            except Exception:
+                pass
+            fallback = self.ui_scaled_cache.get(icon_id, wx.NullBitmap)
+            return fallback if fallback and fallback.IsOk() else wx.NullBitmap
+
+        scale_key = round(scale, 3)
+        cache_key = (icon_id, int(logical_size), scale_key)
+        cached = self.ui_dpi_scaled_cache.get(cache_key)
+        if cached is not None and cached.IsOk():
+            return cached
+
+        nearest_quality = getattr(
+            wx, "IMAGE_QUALITY_NEAREST", getattr(wx, "IMAGE_QUALITY_NORMAL", 0)
+        )
+        reduction_quality = getattr(
+            wx, "IMAGE_QUALITY_HIGH",
+            getattr(wx, "IMAGE_QUALITY_BILINEAR", getattr(wx, "IMAGE_QUALITY_NORMAL", 0)),
+        )
+
+        can_tag_scale = scale > 1.0 and hasattr(wx.Bitmap, "SetScaleFactor")
+        physical_size = int(logical_size)
+        if can_tag_scale:
+            physical_size = max(int(logical_size), int(round(logical_size * scale)))
+
+        try:
+            quality = (
+                reduction_quality
+                if img.GetWidth() > physical_size or img.GetHeight() > physical_size
+                else nearest_quality
+            )
+            scaled = img.Scale(physical_size, physical_size, quality)
+        except Exception:
+            return self.ui_scaled_cache.get(icon_id, wx.NullBitmap)
+        if scaled is None or not scaled.IsOk():
+            return self.ui_scaled_cache.get(icon_id, wx.NullBitmap)
+
+        try:
+            bitmap = scaled.ConvertToBitmap()
+        except Exception:
+            return self.ui_scaled_cache.get(icon_id, wx.NullBitmap)
+        if not bitmap or not bitmap.IsOk():
+            return self.ui_scaled_cache.get(icon_id, wx.NullBitmap)
+
+        if can_tag_scale:
+            try:
+                bitmap.SetScaleFactor(scale)
+            except Exception:
+                return self.ui_scaled_cache.get(icon_id, wx.NullBitmap)
+            if not bitmap.IsOk():
+                return self.ui_scaled_cache.get(icon_id, wx.NullBitmap)
+
+        self.ui_dpi_scaled_cache[cache_key] = bitmap
+        return bitmap
 
     def get_bitmap(self, bedrock_id):
         return self.scaled_cache.get(bedrock_id)
@@ -5793,6 +5927,13 @@ class InventoryEditor(wx.Frame):
             inventory_grid = wx.GridSizer(3, 9, grid_gap, grid_gap)
             hotbar_grid = wx.GridSizer(1, 9, grid_gap, grid_gap)
 
+            armor_placeholder_icons = [
+                'empty_armor_slot_helmet',
+                'empty_armor_slot_chestplate',
+                'empty_armor_slot_leggings',
+                'empty_armor_slot_boots',
+            ]
+
             for i in range(4):
                 item = self.inventory.get('Armor', [None] * 4)[i]
                 item_name = ((item["Name"].py_str[10:] if item["Name"].py_str.startswith("minecraft:") else item["Name"].py_str) if item and "Name" in item else '')
@@ -5801,7 +5942,7 @@ class InventoryEditor(wx.Frame):
                 count = item.get("Count", 1) if item else 0
                 icon_bitmap = self.resources.get_scaled_cache.get(item_name, wx.NullBitmap)
 
-                button = IconButton(self.scroll_panel, item_name, display_name, count, icon_bitmap, i, self)
+                button = IconButton(self.scroll_panel, item_name, display_name, count, icon_bitmap, i, self, empty_slot_icon_id=armor_placeholder_icons[i])
                 button.HideButtonValue()
                 button.Set_slot_map_key('Armor', i)
                 armor_grid.Add(button, 0, wx.CENTRE | wx.ALL, _ui_metric(self, 2, 4))
@@ -5816,7 +5957,7 @@ class InventoryEditor(wx.Frame):
             display_name = self._item_display_info(display_name, offhand_item, self.inventory)
             count = offhand_item.get("Count", 1) if offhand_item else 0
             icon_bitmap = self.resources.get_scaled_cache.get(item_name)
-            offhand_button = IconButton(self.scroll_panel, item_name, display_name, count, icon_bitmap, 0, self)
+            offhand_button = IconButton(self.scroll_panel, item_name, display_name, count, icon_bitmap, 0, self, empty_slot_icon_id='empty_armor_slot_shield')
             offhand_button.SetBackgroundColour((0, 255, 0))
             offhand_grid.Add(offhand_button, 0, wx.CENTRE | wx.ALL, _ui_metric(self, 2, 4))
             self.slot_map[('Offhand', 0)] = offhand_button
@@ -8047,7 +8188,7 @@ class ItemTools:
 
 class IconButton(wx.Panel):
     def __init__(self, parent, bedrock_id, display_name, count, icon_bitmap, slot,
-                 editor, *args, **kw):
+                 editor, empty_slot_icon_id=None, *args, **kw):
         super().__init__(parent, *args, **kw)
         self.is_mouse_down = False
         self.motion_fired = False
@@ -8089,6 +8230,7 @@ class IconButton(wx.Panel):
         self.last_key = ''
         self.tag_data = None
         self.icon_bitmap = icon_bitmap
+        self.empty_slot_icon_id = empty_slot_icon_id
         self.slot_map_key = ()
         self.bedrock_id = bedrock_id
         self.display_name = display_name
@@ -8131,6 +8273,26 @@ class IconButton(wx.Panel):
 
         self._drag_capture_window = None
         self.Bind(wx.EVT_WINDOW_DESTROY, self._on_drag_destroy)
+
+    def _show_empty_slot_visual(self):
+        label = _UI_SLOT_LABELS.get(self.empty_slot_icon_id, 'Empty')
+        self.bedrock_id = ''
+        self.display_name = label
+        self.button.SetName('Empty')
+        self.button.SetLabel('')
+        bitmap = wx.NullBitmap
+        if self.empty_slot_icon_id:
+            try:
+                bitmap = self.editor.resources.get_dpi_ui_bitmap(
+                    self.empty_slot_icon_id, self, logical_size=self._bitmap_size or 64
+                )
+            except Exception:
+                bitmap = wx.NullBitmap
+        if bitmap and bitmap.IsOk():
+            self.button.SetBitmap(bitmap)
+        else:
+            self.button.SetBitmap(wx.NullBitmap)
+        self.button.SetToolTip(wx.ToolTip(label))
 
     def _finish_drag_visual(self):
         timer = getattr(self, '_drag_tick_timer', None)
@@ -8306,16 +8468,13 @@ class IconButton(wx.Panel):
         if not button_icon_source.IsOk():
 
             return False
-        if button_icon_target.IsOk():
+        if not self._tar_empty and button_icon_target.IsOk():
             source_button.button.SetBitmap(button_icon_target)
             source_button.button.SetToolTip(target_tip)
             source_button.button.SetName(button_name_target)
         else:
 
-            source_button.button.SetName('Empty')
-            source_button.button.SetToolTip('Empty')
-            source_button.button.SetBitmap(wx.NullBitmap)
-            source_button.count_box.SetValue("0")
+            source_button.delete_slot()
         if button_icon_source:
             if button_icon_source.IsOk():
                 self.button.SetBitmap(button_icon_source)
@@ -8367,11 +8526,7 @@ class IconButton(wx.Panel):
                 else:
                     target_list[target_index]['Count'] = ByteTag(combined_count)
 
-                CLIP_BOARD['SOURCE_SELF'].SetValue(0)
-                source_button.button.SetBitmap(wx.NullBitmap)
-                source_button.button.SetToolTip('Empty')
-
-                source_button.button.SetName('Empty')
+                source_button.delete_slot()
                 self.SetValue(combined_count)
 
                 if source_static:
@@ -8421,6 +8576,22 @@ class IconButton(wx.Panel):
                     copy_nbt_item_fields(target_list[target_index], source_list[source_index], source_slot)
                     copy_nbt_item_fields(temp, target_list[target_index], target_slot)
 
+        if self.empty_slot_icon_id or source_button.empty_slot_icon_id:
+            for control, items, path, slot_number in (
+                    (source_button, source_list, source_path, source_slot),
+                    (self, target_list, target_path, target_slot)):
+                index = _inventory_item_index(items, slot_number, path)
+                item = items[index] if index is not None else None
+                item_id = _inventory_atlas_item_id(item, control.editor.resources.get_json_data)
+                if item_id and control.GetValue().py_int > 0:
+                    name = control.editor.resources.get(item_id, {}).get('display_name', item_id)
+                    name = control.editor._item_display_info(name, item, control.editor.inventory)
+                    control.SetLabelText(item_id)
+                    control.SetTagData(item)
+                    control.button.SetName(item_id)
+                    control.editor._refresh_slot_display(control, item_id, name)
+                else:
+                    control.delete_slot()
         source_control = CLIP_BOARD.get('SOURCE_SELF')
         if source_control is not None:
             source_control._finish_drag_visual()
@@ -8483,7 +8654,7 @@ class IconButton(wx.Panel):
         self.is_mouse_down = True
 
         image = event.GetEventObject().GetBitmap()
-        if not image or not image.IsOk():
+        if self.button.GetName() == 'Empty' or not image or not image.IsOk():
             event.Skip()
             return
 
@@ -8826,6 +8997,8 @@ class IconButton(wx.Panel):
         self.button.Bind(wx.EVT_RIGHT_DOWN, self.on_right_click)
         self.button.Bind(wx.EVT_MOTION, self.OnMouseMove)
         self.button.Bind(wx.EVT_LEFT_DCLICK, self.on_doubble_click)
+        if not valid_bitmap and not self.bedrock_id and self.empty_slot_icon_id:
+            self._show_empty_slot_visual()
     def OnTextChange(self, event):
         value = self.count_box.GetValue()
 
@@ -9299,11 +9472,8 @@ class IconButton(wx.Panel):
         self.SetLabelText('')
         self.SetTagData(None)
         self.icon_bitmap = None
-        self.button.SetName('Empty')
-        self.button.SetLabel('')
-        self.clear_bitmap()
-        self.SetBitmap(wx.NullBitmap, 'Empty')
         self.count_box.SetValue('0')
+        self._show_empty_slot_visual()
         self.Layout()
         self.Refresh()
 
